@@ -46,10 +46,10 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     lev_amt = cp.sum(w) - 1
     net_return = w @ returns_series.values - (lev_amt * borrow_cost)
     
-    # --- CORRECTION DCP : Régularisation de la matrice ---
-    # On ajoute une minuscule valeur (1e-7) pour s'assurer que la matrice est définie positive
-    safe_cov = cov_matrix.values + np.eye(n) * 1e-7
-    risk = cp.quad_form(w, safe_cov)
+    # --- FIX DCP : Régularisation numérique ---
+    # Ajout d'une valeur infime (1e-8) pour garantir que la matrice est strictement PSD
+    psd_cov = cov_matrix.values + np.eye(n) * 1e-8
+    risk = cp.quad_form(w, psd_cov)
     
     constraints = [cp.sum(w) <= lev_limit, cp.sum(w) >= 1.0, net_return >= target_ret, w >= 0]
     for i, name in enumerate(returns_series.index):
@@ -60,6 +60,7 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     constraints.append(cp.sum(w[ill_idx]) <= max_ill_limit)
     
     prob = cp.Problem(cp.Minimize(risk), constraints)
+    # OSQP est plus robuste pour ce type de problèmes
     prob.solve(solver=cp.OSQP)
     return w.value if w.value is not None else None
 
@@ -68,7 +69,7 @@ st.title("🏛️ Station de Recherche : Portefeuille Institutionnel")
 tab_opt, tab_risk, tab_lex = st.tabs(["📊 Optimisation", "📈 Risque & Matrice", "🔍 Lexique"])
 
 with st.sidebar:
-    st.header("⚙️ Paramètres")
+    st.header("⚙️ Configuration")
     lev_max = st.slider("Levier Brut Max", 1.0, 2.0, 1.25)
     target_r = st.slider("Cible Rendement NET (%)", 4.0, 10.0, 6.5) / 100
     alpha = st.slider("Alpha (Délissage)", 0.3, 1.0, 0.5)
@@ -77,15 +78,14 @@ with st.sidebar:
     mode_cma = st.radio("Source CMA :", ["Historique", "Manuel"])
 
 with tab_lex:
-    st.header("📖 Lexique Institutionnel")
+    st.header("📖 Lexique et Architecture")
     st.markdown("""
-    * **Levier Brut :** Capacité d'emprunt pour augmenter l'exposition.
-    * **Alpha :** Facteur de délissage pour les actifs illiquides.
-    * **TPA :** *Total Portfolio Approach*, approche globale du risque.
+    * **Levier Brut :** Exposition totale incluant l'emprunt.
+    * **Alpha :** Correction de la volatilité pour les actifs privés.
+    * **DCP Rules :** Règles de programmation convexe garantissant une solution optimale.
     """)
-    st.divider()
     applied_fees = {}
-    st.subheader("Frais Manuels (RFG)")
+    st.divider()
     cols_f = st.columns(3)
     for i, (asset, ticker) in enumerate(TICKERS_DICT.items()):
         with cols_f[i % 3]:
@@ -98,7 +98,6 @@ with tab_opt:
     for i, asset in enumerate(TICKERS_DICT.keys()):
         with cols[i % 4]:
             b_min = st.number_input(f"Min {asset} %", 0, 100, 0, key=f"min_{asset}") / 100
-            # On force le cash à 0 par défaut pour éviter l'erreur de saturation
             def_max = 0 if "Cash" in asset else 40
             b_max = st.number_input(f"Max {asset} %", 0, 100, def_max, key=f"max_{asset}") / 100
             asset_bounds[asset] = (b_min, b_max)
@@ -117,8 +116,6 @@ with tab_opt:
             cov_base = data.cov() * 12
 
         exp_rets = exp_raw - pd.Series(applied_fees)
-        
-        # Application de l'Alpha
         for a in ILLIQUID_ASSETS:
             cov_base.loc[a, :], cov_base.loc[:, a] = cov_base.loc[a, :] * (1/alpha), cov_base.loc[:, a] * (1/alpha)
 
@@ -126,15 +123,14 @@ with tab_opt:
 
         if w_opt is not None:
             w_opt = np.array([x if x > 0.001 else 0 for x in w_opt])
-            
-            # Métriques
             st.divider()
-            m1, m2, m3 = st.columns(3)
             p_ret = (w_opt @ exp_rets) - ((np.sum(w_opt)-1) * borrow_cost)
             p_vol = np.sqrt(w_opt.T @ cov_base @ w_opt)
-            m1.metric("Rendement Net", f"{p_ret:.2%}")
-            m2.metric("Volatilité", f"{p_vol:.2%}")
-            m3.metric("Carry Levier", f"{(w_opt @ exp_rets / np.sum(w_opt)) - borrow_cost:+.2%}")
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Rendement Net", f"{p_ret:.2%}")
+            c2.metric("Volatilité", f"{p_vol:.2%}")
+            c3.metric("Carry Levier", f"{(w_opt @ exp_rets / np.sum(w_opt)) - borrow_cost:+.2%}")
 
             c_pie, c_ef = st.columns(2)
             with c_pie:
@@ -143,7 +139,6 @@ with tab_opt:
                 fig.update_traces(textinfo='percent+label')
                 st.plotly_chart(fig, use_container_width=True)
             with c_ef:
-                # Tracé de la frontière
                 t_range = np.linspace(0.04, 0.12, 10)
                 f_vols, f_rets = [], []
                 for r in t_range:
@@ -151,14 +146,12 @@ with tab_opt:
                     if wt is not None:
                         f_rets.append((wt @ exp_rets) - ((np.sum(wt)-1)*borrow_cost))
                         f_vols.append(np.sqrt(wt.T @ cov_base @ wt))
-                fig_ef = px.line(x=f_vols, y=f_rets, title="Frontière Efficiente", labels={'x':'Vol','y':'Rend'})
-                fig_ef.add_scatter(x=[p_vol], y=[p_ret], name="Sélection", marker=dict(size=12, color='red'))
-                st.plotly_chart(fig_ef, use_container_width=True)
+                st.plotly_chart(px.line(x=f_vols, y=f_rets, title="Frontière Efficiente", labels={'x':'Vol','y':'Rend'}), use_container_width=True)
         else:
-            st.error("⚠️ Pas de solution. Vérifiez si vos bornes Min sont compatibles avec votre cible.")
+            st.error("⚠️ Pas de solution. Vérifiez vos contraintes ou baissez la cible.")
 
     except Exception as e:
-        st.error(f"Erreur technique : {e}")
+        st.error(f"Erreur : {e}")
 
 with tab_risk:
     if 'data' in locals():
