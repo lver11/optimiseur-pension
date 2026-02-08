@@ -3,7 +3,6 @@ import numpy as np
 import pandas as pd
 import cvxpy as cp
 import plotly.express as px
-import plotly.graph_objects as go
 import yfinance as yf
 
 st.set_page_config(page_title="Stratégie Pension Canada", layout="wide")
@@ -46,12 +45,21 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     lev_amt = cp.sum(w) - 1
     net_return = w @ returns_series.values - (lev_amt * borrow_cost)
     
-    # --- FIX DCP : Régularisation numérique ---
-    # Ajout d'une valeur infime (1e-8) pour garantir que la matrice est strictement PSD
-    psd_cov = cov_matrix.values + np.eye(n) * 1e-8
-    risk = cp.quad_form(w, psd_cov)
+    # --- SOLUTION RADICALE POUR DCP ---
+    # 1. Forcer la symétrie parfaite
+    S = (cov_matrix.values + cov_matrix.values.T) / 2
+    # 2. Ajouter une régularisation plus forte (1e-6) pour garantir la courbure convexe
+    S += np.eye(n) * 1e-6
     
-    constraints = [cp.sum(w) <= lev_limit, cp.sum(w) >= 1.0, net_return >= target_ret, w >= 0]
+    risk = cp.quad_form(w, cp.psd_wrap(S))
+    
+    constraints = [
+        cp.sum(w) <= lev_limit, 
+        cp.sum(w) >= 1.0, 
+        net_return >= target_ret,
+        w >= 0
+    ]
+    
     for i, name in enumerate(returns_series.index):
         constraints.append(w[i] >= asset_bounds[name][0])
         constraints.append(w[i] <= asset_bounds[name][1])
@@ -60,8 +68,12 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     constraints.append(cp.sum(w[ill_idx]) <= max_ill_limit)
     
     prob = cp.Problem(cp.Minimize(risk), constraints)
-    # OSQP est plus robuste pour ce type de problèmes
-    prob.solve(solver=cp.OSQP)
+    # Utilisation de ECOS ou OSQP selon disponibilité, ECOS est souvent plus précis pour QuadForm
+    try:
+        prob.solve(solver=cp.ECOS)
+    except:
+        prob.solve(solver=cp.OSQP)
+        
     return w.value if w.value is not None else None
 
 # --- 2. INTERFACE ---
@@ -80,9 +92,9 @@ with st.sidebar:
 with tab_lex:
     st.header("📖 Lexique et Architecture")
     st.markdown("""
-    * **Levier Brut :** Exposition totale incluant l'emprunt.
-    * **Alpha :** Correction de la volatilité pour les actifs privés.
-    * **DCP Rules :** Règles de programmation convexe garantissant une solution optimale.
+    * **Levier Brut :** Exposition totale (Capital + Emprunt).
+    * **Alpha :** Correction de volatilité pour les actifs privés.
+    * **DCP :** Norme mathématique de convexité.
     """)
     applied_fees = {}
     st.divider()
@@ -148,7 +160,7 @@ with tab_opt:
                         f_vols.append(np.sqrt(wt.T @ cov_base @ wt))
                 st.plotly_chart(px.line(x=f_vols, y=f_rets, title="Frontière Efficiente", labels={'x':'Vol','y':'Rend'}), use_container_width=True)
         else:
-            st.error("⚠️ Pas de solution. Vérifiez vos contraintes ou baissez la cible.")
+            st.error("⚠️ Pas de solution. Vérifiez vos bornes.")
 
     except Exception as e:
         st.error(f"Erreur : {e}")
@@ -157,6 +169,3 @@ with tab_risk:
     if 'data' in locals():
         st.header("📈 Matrice de Corrélation")
         st.plotly_chart(px.imshow(data.corr(), text_auto=".2f", color_continuous_scale='RdBu_r'), use_container_width=True)
-        if 'w_opt' in locals() and w_opt is not None:
-            rc = (w_opt * (cov_base @ w_opt)) / (p_vol**2)
-            st.plotly_chart(px.bar(x=list(TICKERS_DICT.keys()), y=rc*100, title="Contribution au Risque (%)"), use_container_width=True)
