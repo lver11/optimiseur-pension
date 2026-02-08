@@ -9,13 +9,13 @@ st.set_page_config(page_title="Dashboard Strategique Pension", layout="wide")
 
 # --- 1. CONFIGURATION DES ACTIFS ---
 TICKERS_DICT = {
-    "Actions US (Hedged)": "VSP.TO",
-    "Actions Mondiales": "VXC.TO",
+    "Actions US (Unhedged)": "VFV.TO",
+    "Actions Mondiales (Unhedged)": "VXC.TO",
     "Marchés Émergents": "VEE.TO",
     "Infrastructures": "ZGI.TO",
     "Immobilier Listé": "VRE.TO",
     "Matières Premières": "DBC",
-    "Petites Caps US": "IWM",
+    "Petites Caps US (Unhedged)": "XSU.TO",
     "Obligations Can": "VAB.TO",
     "Dette Privée (Proxy)": "XHY.TO",
     "Hypothèques Comm. (Proxy)": "XCB.TO",
