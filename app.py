@@ -8,7 +8,7 @@ import yfinance as yf
 
 st.set_page_config(page_title="Stratégie Pension Canada", layout="wide")
 
-# --- 1. CONFIGURATION ET LOGIQUE ---
+# --- 1. CONFIGURATION DES ACTIFS ET PROXYS ---
 TICKERS_DICT = {
     "Actions US (Unhedged)": "VFV.TO",
     "Actions Mondiales (Unhedged)": "VXC.TO",
@@ -23,8 +23,24 @@ TICKERS_DICT = {
     "Cash (RFR)": "PSA.TO"
 }
 
+# Détails techniques des instruments (Source: Sites des émetteurs - Approx.)
+PROXY_DETAILS = [
+    {"Classe": "Actions US (Unhedged)", "Ticker": "VFV.TO", "Description": "Vanguard S&P 500 ETF", "RFG (MER)": "0.09%"},
+    {"Classe": "Actions Mondiales (Unhedged)", "Ticker": "VXC.TO", "Description": "Vanguard Global All Cap ETF", "RFG (MER)": "0.21%"},
+    {"Classe": "Marchés Émergents", "Ticker": "VEE.TO", "Description": "Vanguard Emerging Markets ETF", "RFG (MER)": "0.24%"},
+    {"Classe": "Infrastructures", "Ticker": "ZGI.TO", "Description": "BMO Global Infrastructure Index ETF", "RFG (MER)": "0.61%"},
+    {"Classe": "Immobilier Listé", "Ticker": "VRE.TO", "Description": "Vanguard Cdn Capped REIT ETF", "RFG (MER)": "0.39%"},
+    {"Classe": "Matières Premières", "Ticker": "DBC", "Description": "Invesco DB Commodity Tracking", "RFG (MER)": "0.85%"},
+    {"Classe": "Petites Caps US (Unhedged)", "Ticker": "XSU.TO", "Description": "iShares Russell 2000 (CAD Unhedged)", "RFG (MER)": "0.33%"},
+    {"Classe": "Obligations Can", "Ticker": "VAB.TO", "Description": "Vanguard Cdn Aggregate Bond ETF", "RFG (MER)": "0.09%"},
+    {"Classe": "Dette Privée (Proxy)", "Ticker": "XHY.TO", "Description": "iShares US High Yield (CAD Hedged)", "RFG (MER)": "0.61%"},
+    {"Classe": "Hypothèques Comm. (Proxy)", "Ticker": "XCB.TO", "Description": "iShares Cdn Corporate Bond ETF", "RFG (MER)": "0.18%"},
+    {"Classe": "Cash (RFR)", "Ticker": "PSA.TO", "Description": "Purpose High Interest Savings ETF", "RFG (MER)": "0.15%"}
+]
+
 ILLIQUID_ASSETS = ["Infrastructures", "Dette Privée (Proxy)", "Hypothèques Comm. (Proxy)", "Immobilier Listé"]
 
+# --- 2. FONCTIONS DE CALCUL ---
 @st.cache_data
 def get_market_data(tickers):
     tickers_list = list(tickers.values())
@@ -43,7 +59,7 @@ def desmooth_cov(cov, alpha, illiquid_list):
             adj_cov.loc[:, asset] *= adj_factor
     return adj_cov
 
-def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow_cost, asset_bounds, max_illiquid, illiquid_list):
+def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow_cost, asset_bounds, max_ill_limit, illiquid_list):
     n = len(returns_series)
     w = cp.Variable(n)
     lev_amt = cp.sum(w) - 1
@@ -55,13 +71,14 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
         constraints.append(w[i] >= asset_bounds[name][0])
         constraints.append(w[i] <= asset_bounds[name][1])
     ill_idx = [i for i, name in enumerate(asset_names) if name in illiquid_list]
-    constraints.append(cp.sum(w[ill_idx]) <= max_illiquid)
+    constraints.append(cp.sum(w[ill_idx]) <= max_ill_limit)
     prob = cp.Problem(cp.Minimize(risk), constraints)
     prob.solve()
     return w.value if w.value is not None else None
 
-# --- 2. INTERFACE SIDEBAR ---
+# --- 3. INTERFACE UTILISATEUR ---
 st.title("🏛️ Station de Recherche : Portefeuille Institutionnel")
+tab_main, tab_arch = st.tabs(["📊 Optimisation et Stratégie", "🔍 Architecture des Données (Proxys)"])
 
 with st.sidebar:
     st.header("⚙️ Paramètres")
@@ -70,91 +87,77 @@ with st.sidebar:
     alpha = st.slider("Alpha (Délissage)", 0.3, 1.0, 0.5)
     st.header("⚖️ Limites Alternatifs")
     max_i = st.slider("Plafond Alternatifs Globaux (%)", 10, 80, 45) / 100
-    st.header("💳 Coût du Financement")
+    st.header("💳 Financement")
     spread_bps = st.number_input("Spread sur levier (bps)", value=120, step=10)
     st.header("🔮 Anticipations (CMA)")
     mode_cma = st.radio("Source :", ["Historique", "Manuel"])
-    user_returns, user_vols = {}, {}
+    user_rets, user_vols = {}, {}
     if mode_cma == "Manuel":
         for asset in TICKERS_DICT.keys():
-            user_returns[asset] = st.number_input(f"Rend. {asset} %", value=7.0, step=0.5) / 100
-            user_vols[asset] = st.number_input(f"Vol. {asset} %", value=12.0, step=0.5) / 100
+            user_rets[asset] = st.number_input(f"Rend. {asset} %", value=7.0, step=0.1) / 100
+            user_vols[asset] = st.number_input(f"Vol. {asset} %", value=12.0, step=0.1) / 100
 
-# --- 3. LÉGENDE ET GLOSSAIRE ---
-with st.expander("📖 Guide des paramètres et Lexique (Lisez-moi)"):
-    st.markdown("""
-    ### Paramètres de Contrôle
-    * **Levier Brut Maximum :** Définit la taille maximale du portefeuille (1.25x signifie que pour 100$ de capital, vous investissez 125$).
-    * **Cible de Rendement :** L'objectif de performance annuel net du coût de financement.
-    * **Alpha (Délissage) :** Ajuste la volatilité des actifs non cotés. Un alpha de 0.5 signifie que nous estimons que la volatilité réelle est le double de la volatilité comptable observée.
-    * **Spread sur levier (bps) :** Le coût additionnel que votre banque vous charge au-dessus du taux sans risque pour emprunter.
+with tab_arch:
+    st.header("Architecture des Données et Instruments de Référence")
+    st.markdown("Détails des FNB (ETF) utilisés comme bases de calcul pour les corrélations et rendements.")
+    st.table(pd.DataFrame(PROXY_DETAILS))
+    st.info("💡 Note : Les rendements affichés dans l'application intègrent déjà les frais de gestion (RFG) des FNB.")
+
+with tab_main:
+    with st.expander("📖 Glossaire des paramètres"):
+        st.markdown("* **Levier :** Taille totale du portefeuille divisée par le capital propre. \n* **Alpha :** Facteur de correction pour 'révéler' la volatilité cachée des actifs illiquides. \n* **Spread :** Marge ajoutée par la banque au taux de base pour votre ligne de crédit.")
     
-    ### Métriques de Performance
-    * **Volatilité Ajustée :** Mesure du risque annuel. Plus elle est élevée, plus les fluctuations sont fortes. Elle inclut la correction de l'Alpha.
-    * **Ratio de Sharpe :** Indique le rendement obtenu par unité de risque. Plus il est élevé, plus le portefeuille est efficient.
-    * **Drawdown (Baisse) :** La perte maximale historique enregistrée entre un sommet et un creux.
-    
-    ### Classes d'Actifs
-    * **Unhedged :** Signifie que la devise n'est pas protégée. Vous profitez de la hausse de l'USD face au CAD lors des crises.
-    * **Proxys :** FNB liquides utilisés pour simuler des actifs privés (Dette, Hypothèques) sur la base de leurs caractéristiques de risque similaires.
-    """)
+    st.header("📊 Politique de Placement (Bornes Min/Max)")
+    asset_bounds = {}
+    cols = st.columns(4)
+    for i, asset in enumerate(TICKERS_DICT.keys()):
+        with cols[i % 4]:
+            b_min = st.number_input(f"Min {asset} (%)", 0, 100, 0, key=f"min_{asset}") / 100
+            b_max = st.number_input(f"Max {asset} (%)", 0, 100, 25, key=f"max_{asset}") / 100
+            asset_bounds[asset] = (b_min, b_max)
 
-# --- 4. BORNES PAR ACTIF ---
-st.header("📊 Politique de Placement (Bornes Min/Max)")
-asset_bounds = {}
-cols = st.columns(4)
-for i, asset in enumerate(TICKERS_DICT.keys()):
-    with cols[i % 4]:
-        b_min = st.number_input(f"Min {asset} (%)", 0, 100, 0, key=f"min_{asset}") / 100
-        b_max = st.number_input(f"Max {asset} (%)", 0, 100, 25, key=f"max_{asset}") / 100
-        asset_bounds[asset] = (b_min, b_max)
+    try:
+        hist_data = get_market_data(TICKERS_DICT)
+        rfr = (1 + hist_data["Cash (RFR)"].mean())**12 - 1
+        borrow_cost = rfr + (spread_bps / 10000)
 
-# --- 5. CALCULS ET AFFICHAGE ---
-try:
-    hist_rets = get_market_data(TICKERS_DICT)
-    corr_matrix = hist_rets.corr()
-    rfr = (1 + hist_rets["Cash (RFR)"].mean())**12 - 1
-    borrow_cost = rfr + (spread_bps / 10000)
+        if mode_cma == "Manuel":
+            exp_rets = pd.Series(user_rets)
+            vols_diag = np.diag([user_vols[asset] for asset in hist_data.columns])
+            manual_cov = vols_diag @ hist_data.corr().values @ vols_diag
+            adj_cov_base = pd.DataFrame(manual_cov, index=hist_data.columns, columns=hist_data.columns)
+        else:
+            exp_rets = hist_data.mean() * 12
+            adj_cov_base = hist_data.cov() * 12
 
-    if mode_cma == "Manuel":
-        exp_rets = pd.Series(user_returns)
-        vols_diag = np.diag([user_vols[asset] for asset in hist_rets.columns])
-        manual_cov = vols_diag @ corr_matrix.values @ vols_diag
-        adj_cov_base = pd.DataFrame(manual_cov, index=hist_rets.columns, columns=hist_rets.columns)
-    else:
-        exp_rets = hist_rets.mean() * 12
-        adj_cov_base = hist_rets.cov() * 12
+        adj_cov = desmooth_cov(adj_cov_base, alpha, ILLIQUID_ASSETS)
+        w_opt = optimize_portfolio(exp_rets, adj_cov, lev_max, target_r, borrow_cost, asset_bounds, max_i, ILLIQUID_ASSETS)
 
-    adj_cov = desmooth_cov(adj_cov_base, alpha, ILLIQUID_ASSETS)
-    w_opt = optimize_portfolio(exp_rets, adj_cov, lev_max, target_r, borrow_cost, asset_bounds, max_i, ILLIQUID_ASSETS)
+        if w_opt is not None:
+            port_ret = w_opt @ exp_rets - (np.sum(w_opt)-1)*borrow_cost
+            port_vol = np.sqrt(w_opt.T @ adj_cov @ w_opt)
+            
+            st.divider()
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Rendement Net", f"{port_ret:.2%}")
+            c2.metric("Volatilité Ajustée", f"{port_vol:.2%}")
+            c3.metric("Ratio de Sharpe", f"{(port_ret-rfr)/port_vol:.2f}")
 
-    if w_opt is not None:
-        port_ret = w_opt @ exp_rets - (np.sum(w_opt)-1)*borrow_cost
-        port_vol = np.sqrt(w_opt.T @ adj_cov @ w_opt)
-        
-        st.divider()
-        st.subheader("🎯 Résultat de l'Allocation")
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Rendement Net", f"{port_ret:.2%}")
-        m2.metric("Volatilité Ajustée", f"{port_vol:.2%}")
-        m3.metric("Ratio de Sharpe", f"{(port_ret-rfr)/port_vol:.2f}")
+            # Graphiques
+            cola, colb = st.columns(2)
+            with cola:
+                st.plotly_chart(px.pie(values=w_opt, names=hist_data.columns, title="Allocation du Capital", hole=0.4), use_container_width=True)
+            with colb:
+                risk_contrib = (w_opt * (adj_cov @ w_opt)) / (port_vol**2)
+                st.plotly_chart(px.pie(values=risk_contrib, names=hist_data.columns, title="Allocation du Risque", hole=0.4), use_container_width=True)
 
-        # Graphiques
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.plotly_chart(px.pie(values=w_opt, names=hist_rets.columns, title="Répartition du Capital", hole=0.4), use_container_width=True)
-        with col_b:
-            risk_contrib = (w_opt * (adj_cov @ w_opt)) / (port_vol**2)
-            st.plotly_chart(px.pie(values=risk_contrib, names=hist_rets.columns, title="Répartition du Risque", hole=0.4), use_container_width=True)
-
-        st.divider()
-        st.subheader("🏁 Backtest vs 60/40")
-        bench_rets = (hist_rets["Actions Mondiales (Unhedged)"] * 0.60) + (hist_rets["Obligations Can"] * 0.40)
-        port_rets_ts = hist_rets.dot(w_opt)
-        comp_df = pd.DataFrame({"Optimisé": (1 + port_rets_ts).cumprod() * 100, "60/40": (1 + bench_rets).cumprod() * 100}, index=hist_rets.index)
-        st.line_chart(comp_df)
-    else:
-        st.error("⚠️ Impossible de trouver une solution. Vérifiez vos bornes Min/Max.")
-
-except Exception as e:
-    st.error(f"Erreur technique : {e}")
+            # Performance historique
+            st.divider()
+            st.subheader("🏁 Performance Historique vs 60/40")
+            bench = (hist_data["Actions Mondiales (Unhedged)"] * 0.60) + (hist_data["Obligations Can"] * 0.40)
+            comp_df = pd.DataFrame({"Optimisé": (1 + hist_data.dot(w_opt)).cumprod() * 100, "60/40": (1 + bench).cumprod() * 100}, index=hist_data.index)
+            st.line_chart(comp_df)
+        else:
+            st.error("⚠️ Impossible de trouver une solution respectant ces bornes.")
+    except Exception as e:
+        st.error(f"Erreur technique : {e}")
