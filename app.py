@@ -8,7 +8,7 @@ import yfinance as yf
 
 st.set_page_config(page_title="Terminal CIO - Pension Canada", layout="wide")
 
-# --- 1. RÉFÉRENTIEL ACTIFS ---
+# --- 1. CONFIGURATION DES ACTIFS ---
 TICKERS_DICT = {
     "Actions US (Unhedged)": "VFV.TO",
     "Actions Mondiales (Unhedged)": "VXC.TO",
@@ -45,22 +45,32 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     w = cp.Variable(n)
     lev_amt = cp.sum(w) - 1
     net_return = w @ returns_series.values - (lev_amt * borrow_cost)
-    # Stabilité PSD
-    S = (cov_matrix.values + cov_matrix.values.T) / 2 + np.eye(n) * 1e-5
+    
+    # Stabilisation PSD pour solveur OSQP/SCS
+    S = (cov_matrix.values + cov_matrix.values.T) / 2 + np.eye(n) * 1e-6
     risk = cp.quad_form(w, cp.psd_wrap(S))
+    
     constraints = [cp.sum(w) <= lev_limit, cp.sum(w) >= 1.0, net_return >= target_ret, w >= 0]
     for i, name in enumerate(returns_series.index):
         constraints.append(w[i] >= asset_bounds[name][0])
         constraints.append(w[i] <= asset_bounds[name][1])
+    
     ill_idx = [i for i, name in enumerate(returns_series.index) if name in ILLIQUID_ASSETS]
     constraints.append(cp.sum(w[ill_idx]) <= max_ill_limit)
+    
     prob = cp.Problem(cp.Minimize(risk), constraints)
-    prob.solve(solver=cp.ECOS)
+    
+    # Cascade de solveurs pour éviter les erreurs "not installed"
+    for solver in [cp.OSQP, cp.SCS, cp.ECOS]:
+        try:
+            prob.solve(solver=solver)
+            if w.value is not None: break
+        except: continue
     return w.value if w.value is not None else None
 
 # --- 2. INTERFACE ---
 st.title("🏛️ Terminal CIO : Optimisation & Risk Management")
-tab_opt, tab_risk, tab_hist, tab_lex = st.tabs(["📊 Optimisation", "📈 Analyse de Corrélation", "🕒 Backtest & Drawdown", "🔍 Lexique & Frais"])
+tab_opt, tab_risk, tab_hist, tab_lex = st.tabs(["📊 Optimisation", "📈 Corrélations", "🕒 Backtest & Drawdown", "🔍 Lexique & Frais"])
 
 with st.sidebar:
     st.header("⚙️ Gouvernance")
@@ -74,12 +84,18 @@ try:
     data = get_market_data(TICKERS_DICT)
     
     with tab_lex:
-        st.header("📖 Lexique & Architecture")
-        st.markdown("* **TPA (Total Portfolio Approach) :** Focus sur la complétude du risque plutôt que l'allocation par silos.")
-        applied_fees = {a: st.number_input(f"Frais {a} %", DEFAULT_MER[TICKERS_DICT[a]]*100, step=0.01, key=f"f_{a}")/100 for a in TICKERS_DICT.keys()}
+        st.header("📖 Lexique et Architecture des Frais")
+        st.markdown("""
+        * **Alpha (Délissage) :** Ajustement de la volatilité pour les actifs privés.
+        * **TPA (Total Portfolio Approach) :** Vision holistique du risque du fonds.
+        * **Maximum Drawdown :** Pire baisse historique enregistrée.
+        """)
+        st.divider()
+        st.subheader("Saisie des Frais (RFG/MER)")
+        applied_fees = {a: st.number_input(f"Frais {a} %", DEFAULT_MER[TICKERS_DICT[a]]*100, step=0.01, key=f"lex_{a}")/100 for a in TICKERS_DICT.keys()}
 
     with tab_risk:
-        st.header("📈 Matrice de Corrélation Institutionnelle")
+        st.header("📈 Matrice de Corrélation Historique")
         fig_corr = px.imshow(data.corr(), text_auto=".2f", color_continuous_scale='RdBu_r', height=800)
         st.plotly_chart(fig_corr, use_container_width=True)
 
@@ -90,8 +106,8 @@ try:
         for i, asset in enumerate(TICKERS_DICT.keys()):
             with cols[i % 4]:
                 b_min = st.number_input(f"Min {asset} %", 0, 100, 0, key=f"min_{asset}") / 100
-                d_max = 0 if "Cash" in asset else 40
-                b_max = st.number_input(f"Max {asset} %", 0, 100, d_max, key=f"max_{asset}") / 100
+                def_max = 0 if "Cash" in asset else (80 if "Mondiales" in asset else 40)
+                b_max = st.number_input(f"Max {asset} %", 0, 100, def_max, key=f"max_{asset}") / 100
                 asset_bounds[asset] = (b_min, b_max)
 
         rfr = (1 + data["Cash (RFR)"].mean())**12 - 1
@@ -110,10 +126,10 @@ try:
             
             st.divider()
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Expected Net Return", f"{p_ret:.2%}")
+            m1.metric("Exp. Net Return", f"{p_ret:.2%}")
             m2.metric("Portfolio Vol", f"{p_vol:.2%}")
             m3.metric("Leverage Carry", f"{(w_opt @ exp_rets / np.sum(w_opt)) - borrow_cost:+.2%}")
-            m4.metric("Total Fees (TER)", f"{np.sum(w_opt * pd.Series(applied_fees)):.2%}")
+            m4.metric("Total Fees", f"{np.sum(w_opt * pd.Series(applied_fees)):.2%}")
 
             c1, c2 = st.columns(2)
             with c1:
@@ -122,22 +138,22 @@ try:
             with c2:
                 rc = (w_opt * (cov_base @ w_opt)) / (p_vol**2)
                 st.plotly_chart(px.bar(x=list(TICKERS_DICT.keys()), y=rc*100, title="Risk Contribution (%)"), use_container_width=True)
+        else:
+            st.error("⚠️ Impossible de converger vers une solution. Élargissez vos bornes.")
 
     with tab_hist:
         if 'w_opt' in locals() and w_opt is not None:
-            st.header("🕒 Performance Historique & Drawdown")
-            
+            st.header("🕒 Croissance & Résilience")
             lev_size = np.sum(w_opt) - 1
-            port_monthly = data.dot(w_opt) - (lev_size * (borrow_cost/12)) - np.sum(w_opt * (pd.Series(applied_fees)/12))
-            cum_port = (1 + port_monthly).cumprod() * 100000
+            port_m = data.dot(w_opt) - (lev_size * (borrow_cost/12)) - np.sum(w_opt * (pd.Series(applied_fees)/12))
+            cum_port = (1 + port_m).cumprod() * 100000
             
-            # Drawdown
             rolling_max = cum_port.cummax()
             drawdown = (cum_port - rolling_max) / rolling_max
             
             st.line_chart(cum_port)
-            st.subheader("Maximum Drawdown Historique")
+            st.subheader("Maximum Drawdown (Simulé)")
             st.area_chart(drawdown)
             st.metric("Max Drawdown (10 ans)", f"{drawdown.min():.2%}")
-
-except Exception as e: st.error(f"Erreur : {e}")
+            
+except Exception as e: st.error(f"Erreur technique : {e}")
