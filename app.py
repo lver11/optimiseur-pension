@@ -104,7 +104,13 @@ try:
         for i, asset in enumerate(TICKERS_DICT.keys()):
             with cols[i % 4]:
                 b_min = st.number_input(f"Min {asset} %", 0, 100, 0, key=f"nmin_{asset}") / 100
-                default_max = 80 if "Mondiales" in asset else 40
+                # Ajustement ici : Le cash est limité à 5% par défaut
+                if "Cash" in asset:
+                    default_max = 5
+                elif "Mondiales" in asset:
+                    default_max = 80
+                else:
+                    default_max = 40
                 b_max = st.number_input(f"Max {asset} %", 0, 100, default_max, key=f"nmax_{asset}") / 100
                 asset_bounds[asset] = (b_min, b_max)
 
@@ -134,7 +140,7 @@ try:
             m3.metric("Frais Totaux", f"{np.sum(w_opt * pd.Series(custom_fees)):.2%}")
             m4.metric("Carry Levier", f"{(w_opt @ exp_rets / np.sum(w_opt)) - borrow_cost:+.2%}")
 
-            # --- EXPORTATION ---
+            # Exportation CSV
             export_df = pd.DataFrame({
                 "Classe d'Actif": hist_data.columns,
                 "Poids Capital (%)": (w_opt * 100).round(2),
@@ -142,11 +148,9 @@ try:
                 "Rendement Attendu (%)": (exp_rets.values * 100).round(2),
                 "Frais Appliqués (%)": (pd.Series(custom_fees).values * 100).round(2)
             })
-            
             csv = export_df.to_csv(index=False).encode('utf-8')
             st.download_button(label="📥 Télécharger l'Allocation (CSV)", data=csv, file_name='allocation_pension.csv', mime='text/csv')
 
-            # --- ANALYSE ---
             st.subheader("⚖️ Analyse Capital vs Risque")
             comparison_df = pd.DataFrame({
                 "Classe d'Actif": hist_data.columns,
@@ -171,6 +175,6 @@ try:
                 st.plotly_chart(px.line(x=f_vols, y=f_rets, title="Efficience", labels={'x':'Vol','y':'Rend'}), use_container_width=True)
 
         else:
-            st.error("⚠️ Pas de solution trouvée.")
+            st.error("⚠️ Pas de solution trouvée. Élargissez vos bornes Max.")
 except Exception as e:
     st.error(f"Erreur : {e}")
