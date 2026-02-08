@@ -46,7 +46,7 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     lev_amt = cp.sum(w) - 1
     net_return = w @ returns_series.values - (lev_amt * borrow_cost)
     
-    # Stabilisation PSD pour solveur OSQP/SCS
+    # Stabilisation PSD pour solveurs
     S = (cov_matrix.values + cov_matrix.values.T) / 2 + np.eye(n) * 1e-6
     risk = cp.quad_form(w, cp.psd_wrap(S))
     
@@ -60,7 +60,6 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     
     prob = cp.Problem(cp.Minimize(risk), constraints)
     
-    # Cascade de solveurs pour éviter les erreurs "not installed"
     for solver in [cp.OSQP, cp.SCS, cp.ECOS]:
         try:
             prob.solve(solver=solver)
@@ -68,7 +67,7 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
         except: continue
     return w.value if w.value is not None else None
 
-# --- 2. INTERFACE ---
+# --- 2. INTERFACE SIDEBAR (SAISIE MANUELLE RÉTABLIE) ---
 st.title("🏛️ Terminal CIO : Optimisation & Risk Management")
 tab_opt, tab_risk, tab_hist, tab_lex = st.tabs(["📊 Optimisation", "📈 Corrélations", "🕒 Backtest & Drawdown", "🔍 Lexique & Frais"])
 
@@ -79,23 +78,32 @@ with st.sidebar:
     alpha = st.slider("Alpha (Délissage)", 0.3, 1.0, 0.5)
     max_i = st.slider("Max Alternatifs (%)", 10, 80, 45) / 100
     spread_bps = st.number_input("Spread Levier (bps)", value=120)
+    
+    st.header("🔮 Capital Market Assumptions (CMA)")
+    mode_cma = st.radio("Source des données :", ["Historique", "Manuel"])
+    
+    user_rets = {}
+    user_vols = {}
+    if mode_cma == "Manuel":
+        st.info("Saisissez vos attentes de rendement et de volatilité long terme.")
+        for asset in TICKERS_DICT.keys():
+            col1, col2 = st.columns(2)
+            with col1:
+                user_rets[asset] = st.number_input(f"Rend. {asset} %", value=7.0, step=0.1, key=f"r_side_{asset}") / 100
+            with col2:
+                user_vols[asset] = st.number_input(f"Vol. {asset} %", value=12.0, step=0.1, key=f"v_side_{asset}") / 100
 
 try:
     data = get_market_data(TICKERS_DICT)
     
     with tab_lex:
-        st.header("📖 Lexique et Architecture des Frais")
-        st.markdown("""
-        * **Alpha (Délissage) :** Ajustement de la volatilité pour les actifs privés.
-        * **TPA (Total Portfolio Approach) :** Vision holistique du risque du fonds.
-        * **Maximum Drawdown :** Pire baisse historique enregistrée.
-        """)
+        st.header("🔍 Architecture des Frais & Lexique")
+        applied_fees = {a: st.number_input(f"Frais {a} %", DEFAULT_MER[TICKERS_DICT[a]]*100, step=0.01, key=f"lex_f_{a}")/100 for a in TICKERS_DICT.keys()}
         st.divider()
-        st.subheader("Saisie des Frais (RFG/MER)")
-        applied_fees = {a: st.number_input(f"Frais {a} %", DEFAULT_MER[TICKERS_DICT[a]]*100, step=0.01, key=f"lex_{a}")/100 for a in TICKERS_DICT.keys()}
+        st.markdown("* **Délissage :** Correction pour les actifs à évaluation non-quotidienne.")
 
     with tab_risk:
-        st.header("📈 Matrice de Corrélation Historique")
+        st.header("📈 Matrice de Corrélation (Agrandie)")
         fig_corr = px.imshow(data.corr(), text_auto=".2f", color_continuous_scale='RdBu_r', height=800)
         st.plotly_chart(fig_corr, use_container_width=True)
 
@@ -105,15 +113,23 @@ try:
         cols = st.columns(4)
         for i, asset in enumerate(TICKERS_DICT.keys()):
             with cols[i % 4]:
-                b_min = st.number_input(f"Min {asset} %", 0, 100, 0, key=f"min_{asset}") / 100
+                b_min = st.number_input(f"Min {asset} %", 0, 100, 0, key=f"min_t_{asset}") / 100
                 def_max = 0 if "Cash" in asset else (80 if "Mondiales" in asset else 40)
-                b_max = st.number_input(f"Max {asset} %", 0, 100, def_max, key=f"max_{asset}") / 100
+                b_max = st.number_input(f"Max {asset} %", 0, 100, def_max, key=f"max_t_{asset}") / 100
                 asset_bounds[asset] = (b_min, b_max)
 
         rfr = (1 + data["Cash (RFR)"].mean())**12 - 1
         borrow_cost = rfr + (spread_bps / 10000)
-        exp_rets = (data.mean() * 12) - pd.Series(applied_fees)
-        cov_base = data.cov() * 12
+        
+        if mode_cma == "Manuel":
+            exp_raw = pd.Series(user_rets)
+            v_diag = np.diag([user_vols[a] for a in TICKERS_DICT.keys()])
+            cov_base = pd.DataFrame(v_diag @ data.corr().values @ v_diag, index=data.columns, columns=data.columns)
+        else:
+            exp_raw = data.mean() * 12
+            cov_base = data.cov() * 12
+
+        exp_rets = exp_raw - pd.Series(applied_fees)
         for a in ILLIQUID_ASSETS:
             cov_base.loc[a, :], cov_base.loc[:, a] = cov_base.loc[a, :] * (1/alpha), cov_base.loc[:, a] * (1/alpha)
 
@@ -126,34 +142,31 @@ try:
             
             st.divider()
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Exp. Net Return", f"{p_ret:.2%}")
+            m1.metric("Expected Net Return", f"{p_ret:.2%}")
             m2.metric("Portfolio Vol", f"{p_vol:.2%}")
             m3.metric("Leverage Carry", f"{(w_opt @ exp_rets / np.sum(w_opt)) - borrow_cost:+.2%}")
-            m4.metric("Total Fees", f"{np.sum(w_opt * pd.Series(applied_fees)):.2%}")
+            m4.metric("Total Fees (TER)", f"{np.sum(w_opt * pd.Series(applied_fees)):.2%}")
 
             c1, c2 = st.columns(2)
             with c1:
                 df_p = pd.DataFrame({"Actif": list(TICKERS_DICT.keys()), "Poids": w_opt})
-                st.plotly_chart(px.pie(df_p[df_p["Poids"]>0], values="Poids", names="Actif", hole=0.4, title="Asset Mix"), use_container_width=True)
+                st.plotly_chart(px.pie(df_p[df_p["Poids"]>0], values="Poids", names="Actif", hole=0.4, title="Allocation"), use_container_width=True)
             with c2:
                 rc = (w_opt * (cov_base @ w_opt)) / (p_vol**2)
                 st.plotly_chart(px.bar(x=list(TICKERS_DICT.keys()), y=rc*100, title="Risk Contribution (%)"), use_container_width=True)
         else:
-            st.error("⚠️ Impossible de converger vers une solution. Élargissez vos bornes.")
+            st.error("⚠️ Pas de solution. Ajustez vos bornes.")
 
     with tab_hist:
         if 'w_opt' in locals() and w_opt is not None:
-            st.header("🕒 Croissance & Résilience")
+            st.header("🕒 Croissance & Drawdown Historique")
             lev_size = np.sum(w_opt) - 1
             port_m = data.dot(w_opt) - (lev_size * (borrow_cost/12)) - np.sum(w_opt * (pd.Series(applied_fees)/12))
             cum_port = (1 + port_m).cumprod() * 100000
-            
             rolling_max = cum_port.cummax()
             drawdown = (cum_port - rolling_max) / rolling_max
-            
             st.line_chart(cum_port)
-            st.subheader("Maximum Drawdown (Simulé)")
             st.area_chart(drawdown)
             st.metric("Max Drawdown (10 ans)", f"{drawdown.min():.2%}")
             
-except Exception as e: st.error(f"Erreur technique : {e}")
+except Exception as e: st.error(f"Erreur : {e}")
