@@ -12,8 +12,7 @@ st.set_page_config(page_title="Institutional Portfolio Optimizer", layout="wide"
 # --- 1. RÉCUPÉRATION DES DONNÉES ---
 @st.cache_data
 def get_market_data():
-    # Dictionnaire des tickers pour identifier chaque classe
-    tickers = {
+    tickers_dict = {
         "Actions US": "VTI", 
         "Actions Int.": "VEU", 
         "Obligations": "AGG", 
@@ -21,12 +20,24 @@ def get_market_data():
         "Immobilier": "VNQ",
         "RFR (T-Bill)": "BIL"
     }
-    raw_data = yf.download(list(tickers.values()), period="10y", interval="1mo")['Adj Close']
-    returns = raw_data.pct_change().dropna()
+    # On télécharge les données
+    tickers_list = list(tickers_dict.values())
+    raw_data = yf.download(tickers_list, period="10y", interval="1mo")
     
-    # Inversion du dictionnaire pour renommer les colonnes selon les clés (ex: VTI -> Actions US)
-    inv_tickers = {v: k for k, v in tickers.items()}
+    # Correction ici : on extrait 'Adj Close' de manière sécurisée
+    if 'Adj Close' in raw_data.columns:
+        data = raw_data['Adj Close']
+    else:
+        # Si Adj Close n'est pas dispo, on prend Close
+        data = raw_data['Close']
+    
+    # On s'assure que les colonnes sont bien nommées par les tickers
+    returns = data.pct_change().dropna()
+    
+    # Renommage avec les noms conviviaux
+    inv_tickers = {v: k for k, v in tickers_dict.items()}
     returns = returns.rename(columns=inv_tickers)
+    
     return returns
 
 # --- 2. LOGIQUE DE DÉLISSAGE ---
