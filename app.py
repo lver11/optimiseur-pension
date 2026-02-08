@@ -63,11 +63,10 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
         except: continue
     return w.value if w.value is not None else None
 
-# --- 2. LOGIQUE DE CHARGEMENT ---
+# --- 2. LOGIQUE DE CHARGEMENT ET SIDEBAR ---
 try:
     data = get_market_data(TICKERS_DICT)
 
-    # --- 3. INTERFACE SIDEBAR ---
     with st.sidebar:
         st.header("⚙️ Gouvernance & Limites")
         lev_max = st.slider("Levier Brut Max", 1.0, 2.5, 1.25)
@@ -76,16 +75,22 @@ try:
         max_i = st.slider("Max Alternatifs (%)", 10, 80, 50) / 100
         alpha = st.slider("Alpha (Délissage)", 0.2, 1.0, 0.4)
         spread_bps = st.number_input("Spread Levier (bps)", value=120)
+        
+        st.header("🔮 Capital Market Assumptions")
+        mode_cma = st.radio("Source des données :", ["Historique", "Manuel"])
+        user_rets, user_vols = {}, {}
+        if mode_cma == "Manuel":
+            for asset in TICKERS_DICT.keys():
+                st.markdown(f"**{asset}**")
+                c1, c2 = st.columns(2)
+                user_rets[asset] = c1.number_input(f"Rend. %", 7.0, key=f"r_{asset}")/100
+                user_vols[asset] = c2.number_input(f"Vol. %", 12.0, key=f"v_{asset}")/100
 
-    # --- 4. NAVIGATION PAR ONGLETS ---
+    # --- 3. ONGLETS ---
     tab_opt, tab_risk, tab_lex = st.tabs(["📊 Optimisation", "📈 Analyse Risque", "🔍 Lexique"])
 
     with tab_lex:
-        st.header("📖 Glossaire Institutionnel")
-        st.markdown("""
-        * **Placement Privé (PE) :** Investissement hors marchés publics avec prime d'illiquidité.
-        * **Délissage (Alpha) :** Ajustement de la volatilité pour les actifs évalués périodiquement.
-        """)
+        st.header("📖 Glossaire & Frais")
         applied_fees = {a: st.number_input(f"Frais {a} %", DEFAULT_MER[TICKERS_DICT[a]]*100, step=0.01, key=f"f_{a}")/100 for a in TICKERS_DICT.keys()}
 
     with tab_risk:
@@ -106,8 +111,17 @@ try:
 
         rfr = (1 + data["Cash (RFR)"].mean())**12 - 1
         borrow_cost = rfr + (spread_bps / 10000)
-        exp_rets = (data.mean()*12) - pd.Series(applied_fees)
-        cov_base = data.cov()*12
+        
+        # Sélection de la source de rendement/vol
+        if mode_cma == "Manuel":
+            exp_raw = pd.Series(user_rets)
+            v_diag = np.diag([user_vols[a] for a in TICKERS_DICT.keys()])
+            cov_base = pd.DataFrame(v_diag @ data.corr().values @ v_diag, index=data.columns, columns=data.columns)
+        else:
+            exp_raw = data.mean()*12
+            cov_base = data.cov()*12
+
+        exp_rets = exp_raw - pd.Series(applied_fees)
         for a in ILLIQUID_ASSETS:
             cov_base.loc[a, :], cov_base.loc[:, a] = cov_base.loc[a, :] * (1/alpha), cov_base.loc[:, a] * (1/alpha)
 
@@ -128,8 +142,6 @@ try:
             c1.plotly_chart(px.pie(pd.DataFrame({"A": TICKERS_DICT.keys(), "P": w_opt}), values="P", names="A", hole=0.4, title="Asset Mix"), use_container_width=True)
             rc = (w_opt * (cov_base @ w_opt)) / (p_vol**2 if p_vol > 0 else 1)
             c2.plotly_chart(px.bar(x=list(TICKERS_DICT.keys()), y=rc*100, title="Risk Contribution (%)"), use_container_width=True)
-        else:
-            st.error("⚠️ Pas de solution trouvée. Vérifiez vos contraintes.")
 
 except Exception as e:
     st.error(f"Erreur technique : {e}")
