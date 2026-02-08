@@ -106,4 +106,12 @@ try:
 
         col_a, col_b = st.columns(2)
         with col_a:
-            fig_cap = px.pie(values
+            # Correction de la parenthèse fermante ici
+            fig_cap = px.pie(values=w_opt, names=hist_rets.columns, title="Allocation par Classe d'Actifs", hole=0.4)
+            st.plotly_chart(fig_cap, use_container_width=True)
+        with col_b:
+            mctr = (adj_cov @ w_opt) / port_vol
+            tctr = (w_opt * mctr) / port_vol
+            # Correction de la parenthèse fermante ici
+            fig_risk = px.pie(values=tctr, names=hist_rets.columns, title="Contribution au Risque (Volatilité)", hole=0.4)
+            st.plotly_chart(fig_risk, use_container_width=True)
