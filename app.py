@@ -5,12 +5,14 @@ import cvxpy as cp
 import plotly.express as px
 import yfinance as yf
 
-st.set_page_config(page_title="Terminal CIO - Contrôle Dynamique", layout="wide")
+st.set_page_config(page_title="Terminal CIO - Équité Privée & Overlay", layout="wide")
 
-# --- 1. CONFIGURATION ---
+# --- 1. CONFIGURATION DES ACTIFS ---
+# Ajout des Actions Privées via un Proxy (ex: PSP - Private Equity ETF)
 TICKERS_DICT = {
     "Actions US (Unhedged)": "VFV.TO",
     "Actions Mondiales (Unhedged)": "VXC.TO",
+    "Actions Privées (PE)": "PSP",
     "Marchés Émergents (Actions)": "VEE.TO",
     "Dette Marchés Émergents": "VWOB",
     "Infrastructures": "ZGI.TO",
@@ -23,7 +25,15 @@ TICKERS_DICT = {
     "Cash (RFR)": "PSA.TO"
 }
 
-ILLIQUID_ASSETS = ["Infrastructures", "Dette Privée (Proxy)", "Hypothèques Comm. (Proxy)", "Immobilier Listé"]
+# Mise à jour des frais institutionnels par défaut
+DEFAULT_MER = {
+    "VFV.TO": 0.0009, "VXC.TO": 0.0021, "PSP": 0.0150, "VEE.TO": 0.0024, 
+    "VWOB": 0.0020, "ZGI.TO": 0.0061, "VRE.TO": 0.0039, "DBC": 0.0085, 
+    "XSU.TO": 0.0033, "VAB.TO": 0.0009, "XHY.TO": 0.0061, "XCB.TO": 0.0018, "PSA.TO": 0.0015
+}
+
+# Liste étendue des actifs illiquides soumis au délissage
+ILLIQUID_ASSETS = ["Actions Privées (PE)", "Infrastructures", "Dette Privée (Proxy)", "Hypothèques Comm. (Proxy)", "Immobilier Listé"]
 
 @st.cache_data
 def get_market_data(tickers):
@@ -59,85 +69,95 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
 
 # --- 2. INTERFACE SIDEBAR ---
 with st.sidebar:
-    st.header("⚙️ Gouvernance & Risk Overlay")
-    lev_max = st.slider("Levier Brut Max", 1.0, 2.0, 1.25)
-    target_r = st.slider("Cible Rendement NET (%)", 4.0, 10.0, 6.5) / 100
+    st.header("⚙️ Gouvernance CIO")
+    lev_max = st.slider("Levier Brut Max", 1.0, 2.5, 1.25)
+    target_r = st.slider("Cible Rendement NET (%)", 4.0, 12.0, 6.5) / 100
     
-    st.subheader("🛡️ Target Volatility Trigger")
-    vol_target = st.slider("Cible Volatilité Max (%)", 5.0, 15.0, 8.5) / 100
+    st.subheader("🛡️ Risk Overlay")
+    vol_target = st.slider("Cible Volatilité Max (%)", 4.0, 15.0, 9.0) / 100
     enable_deleveraging = st.checkbox("Activer De-leveraging Auto", value=True)
     
-    alpha = st.slider("Alpha (Délissage)", 0.3, 1.0, 0.5)
-    max_i = st.slider("Max Alternatifs (%)", 10, 80, 45) / 100
+    alpha = st.slider("Alpha (Délissage PE/Privé)", 0.2, 1.0, 0.4)
+    max_i = st.slider("Max Alternatifs Cumulés (%)", 10, 80, 50) / 100
     spread_bps = st.number_input("Spread Levier (bps)", value=120)
-    mode_cma = st.radio("CMA Source :", ["Historique", "Manuel"])
+    mode_cma = st.radio("Méthode CMA :", ["Historique", "Manuel"])
+    
+    user_rets, user_vols = {}, {}
+    if mode_cma == "Manuel":
+        for asset in TICKERS_DICT.keys():
+            user_rets[asset] = st.sidebar.number_input(f"Rend. {asset} %", 8.0) / 100
+            user_vols[asset] = st.sidebar.number_input(f"Vol. {asset} %", 15.0) / 100
 
-# --- 3. TRAITEMENT ---
+# --- 3. ONGLETS ---
+tab_opt, tab_risk, tab_hist, tab_lex = st.tabs(["📊 Optimisation", "📈 Corrélations", "🕒 Backtest", "🔍 Lexique"])
+
 try:
     data = get_market_data(TICKERS_DICT)
-    tab_opt, tab_risk, tab_lex = st.tabs(["📊 Optimisation", "📈 Analyse Risque", "🔍 Lexique"])
-
+    
     with tab_lex:
-        st.header("📖 Lexique Professionnel")
+        st.header("📖 Glossaire Expert & Frais")
         st.markdown("""
-        * **De-leveraging Auto :** Si la volatilité optimisée dépasse la cible, l'outil réduit le levier proportionnellement pour ramener le risque au niveau souhaité, quitte à sacrifier la cible de rendement.
-        * **Target Volatility :** Méthodologie consistant à ajuster l'exposition au marché pour maintenir un niveau de risque constant.
-        """)
-        applied_fees = {a: st.number_input(f"Frais {a} %", 0.20, key=f"lex_f_{a}")/100 for a in TICKERS_DICT.keys()}
+        * **Actions Privées (PE) :** Investissements hors marchés publics. Prime d'illiquidité élevée mais risque de valorisation "lissée".
+        * **De-leveraging :** Mécanisme de réduction de l'exposition globale pour maintenir le risque sous la barre des **{:.1%}** de volatilité.
+        """.format(vol_target*100))
+        applied_fees = {a: st.number_input(f"Frais {a} %", DEFAULT_MER[TICKERS_DICT[a]]*100, step=0.01, key=f"lex_{a}")/100 for a in TICKERS_DICT.keys()}
 
     with tab_opt:
         asset_bounds = {}
         cols = st.columns(4)
         for i, asset in enumerate(TICKERS_DICT.keys()):
             with cols[i % 4]:
-                b_min = st.number_input(f"Min {asset} %", 0, 100, 0, key=f"min_{asset}")/100
-                b_max = st.number_input(f"Max {asset} %", 0, 100, 40 if "Cash" not in asset else 0, key=f"max_{asset}")/100
+                b_min = st.number_input(f"Min {asset} %", 0, 100, 0, key=f"m_{asset}")/100
+                d_max = 0 if "Cash" in asset else 50
+                b_max = st.number_input(f"Max {asset} %", 0, 100, d_max, key=f"M_{asset}")/100
                 asset_bounds[asset] = (b_min, b_max)
 
         rfr = (1 + data["Cash (RFR)"].mean())**12 - 1
         borrow_cost = rfr + (spread_bps / 10000)
-        exp_raw = data.mean()*12
-        cov_base = data.cov()*12
         
-        # Ajustement Délissage
+        # CMA & Covariance
+        if mode_cma == "Manuel":
+            exp_raw = pd.Series(user_rets)
+            v_diag = np.diag([user_vols[a] for a in TICKERS_DICT.keys()])
+            cov_base = pd.DataFrame(v_diag @ data.corr().values @ v_diag, index=data.columns, columns=data.columns)
+        else:
+            exp_raw = data.mean()*12
+            cov_base = data.cov()*12
+
+        exp_rets = exp_raw - pd.Series(applied_fees)
         for a in ILLIQUID_ASSETS:
             cov_base.loc[a, :], cov_base.loc[:, a] = cov_base.loc[a, :] * (1/alpha), cov_base.loc[:, a] * (1/alpha)
 
-        # 1. Optimisation Initiale
-        w_opt = optimize_portfolio(exp_raw - pd.Series(applied_fees), cov_base, lev_max, target_r, borrow_cost, asset_bounds, max_i)
+        # Optimisation
+        w_opt = optimize_portfolio(exp_rets, cov_base, lev_max, target_r, borrow_cost, asset_bounds, max_i)
         
         if w_opt is not None:
             w_opt = np.array([x if x > 0.001 else 0 for x in w_opt])
             p_vol = np.sqrt(w_opt.T @ cov_base @ w_opt)
-            p_ret = (w_opt @ (exp_raw - pd.Series(applied_fees))) - ((np.sum(w_opt)-1) * borrow_cost)
+            p_ret = (w_opt @ exp_rets) - ((np.sum(w_opt)-1) * borrow_cost)
             
-            # 2. Logic de De-leveraging
-            deleveraging_status = "Inactif"
+            # Overlay
+            status = "Nominal"
             if enable_deleveraging and p_vol > vol_target:
-                deleveraging_status = "ACTIF"
-                adjustment_factor = vol_target / p_vol
-                # On réduit le levier en augmentant le Cash ou en réduisant les positions proportionnellement
-                w_opt = w_opt * adjustment_factor
+                w_opt = w_opt * (vol_target / p_vol)
                 p_vol = np.sqrt(w_opt.T @ cov_base @ w_opt)
-                p_ret = (w_opt @ (exp_raw - pd.Series(applied_fees))) - ((np.sum(w_opt)-1) * borrow_cost if np.sum(w_opt) > 1 else 0)
+                p_ret = (w_opt @ exp_rets) - ((np.sum(w_opt)-1) * borrow_cost if np.sum(w_opt) > 1 else 0)
+                status = "DE-LEVERAGING"
 
             st.divider()
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Rendement Net Final", f"{p_ret:.2%}")
-            m2.metric("Volatilité Pilotée", f"{p_vol:.2%}", delta=f"Cible: {vol_target:.1%}")
-            m3.metric("Levier Effectif", f"{np.sum(w_opt):.2f}x")
-            m4.metric("Status Overlay", deleveraging_status)
-
-            if deleveraging_status == "ACTIF":
-                st.warning(f"⚠️ Levier réduit de { (1-adjustment_factor):.1%} pour respecter votre cible de volatilité.")
+            m1.metric("Exp. Net Return", f"{p_ret:.2%}")
+            m2.metric("Portfolio Vol", f"{p_vol:.2%}")
+            m3.metric("Leverage", f"{np.sum(w_opt):.2f}x")
+            m4.metric("Risk Status", status)
 
             c1, c2 = st.columns(2)
-            c1.plotly_chart(px.pie(pd.DataFrame({"A": TICKERS_DICT.keys(), "P": w_opt}), values="P", names="A", hole=0.4, title="Asset Mix Post-Overlay"), use_container_width=True)
+            c1.plotly_chart(px.pie(pd.DataFrame({"A": TICKERS_DICT.keys(), "P": w_opt}), values="P", names="A", hole=0.4, title="Mix Actifs"), use_container_width=True)
             rc = (w_opt * (cov_base @ w_opt)) / (p_vol**2 if p_vol > 0 else 1)
-            c2.plotly_chart(px.bar(x=list(TICKERS_DICT.keys()), y=rc*100, title="Risk Contribution (%)"), use_container_width=True)
+            c2.plotly_chart(px.bar(x=list(TICKERS_DICT.keys()), y=rc*100, title="Contribution au Risque (%)"), use_container_width=True)
 
     with tab_risk:
-        st.header("📈 Matrice de Corrélation Historique")
-        st.plotly_chart(px.imshow(data.corr(), text_auto=".2f", color_continuous_scale='RdBu_r', height=800), use_container_width=True)
+        fig_corr = px.imshow(data.corr(), text_auto=".2f", color_continuous_scale='RdBu_r', height=800)
+        st.plotly_chart(fig_corr, use_container_width=True)
 
-except Exception as e: st.error(f"Erreur technique : {e}")
+except Exception as e: st.error(f"Erreur : {e}")
