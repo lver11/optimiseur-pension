@@ -72,6 +72,9 @@ with st.sidebar:
     max_s = st.slider("Max par actif (%)", 5, 40, 20) / 100
     max_i = st.slider("Max Alternatifs (%)", 10, 80, 45) / 100
 
+    st.header("💳 Coût du Financement")
+    spread_bps = st.number_input("Spread sur levier (bps)", value=120, step=10)
+
     st.header("🔮 Vos Hypothèses (CMA)")
     mode_cma = st.radio("Source des rendements :", ["Historique (10 ans)", "Manuel (Anticipations)"])
     
@@ -86,7 +89,7 @@ try:
     hist_rets = get_market_data(TICKERS_DICT)
     corr_matrix = hist_rets.corr()
     rfr = (1 + hist_rets["Cash (RFR)"].mean())**12 - 1
-    borrow_cost = rfr + 0.012
+    borrow_cost = rfr + (spread_bps / 10000)
 
     if mode_cma == "Manuel (Anticipations)":
         exp_rets = pd.Series(user_returns)
