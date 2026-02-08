@@ -23,7 +23,6 @@ TICKERS_DICT = {
     "Cash (RFR)": "PSA.TO"
 }
 
-# Données des frais (MER)
 PROXY_DATA = {
     "VFV.TO": {"desc": "Vanguard S&P 500", "mer": 0.0009},
     "VXC.TO": {"desc": "Vanguard Global All Cap", "mer": 0.0021},
@@ -75,10 +74,9 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     prob.solve()
     return w.value if w.value is not None else None
 
-# --- 3. INTERFACE UTILISATEUR ---
+# --- 3. INTERFACE ---
 st.title("🏛️ Station de Recherche : Portefeuille Institutionnel")
 
-# Onglets
 tab_main, tab_arch = st.tabs(["📊 Optimisation et Analyse", "🔍 Architecture et Frais"])
 
 with st.sidebar:
@@ -86,7 +84,7 @@ with st.sidebar:
     lev_max = st.slider("Levier Brut Max", 1.0, 2.0, 1.25)
     target_r = st.slider("Cible Rendement (%)", 4.0, 10.0, 6.5) / 100
     alpha = st.slider("Alpha (Délissage)", 0.3, 1.0, 0.5)
-    max_i = st.slider("Max Alternatifs (%)", 10, 80, 45) / 100
+    max_i = st.slider("Max Alternatifs Globaux (%)", 10, 80, 45) / 100
     spread_bps = st.number_input("Spread Levier (bps)", value=120)
     mode_cma = st.radio("Source CMA :", ["Historique", "Manuel"])
     user_rets, user_vols = {}, {}
@@ -101,17 +99,17 @@ with tab_arch:
     st.table(proxy_df)
 
 with tab_main:
-    # --- RÉINTÉGRATION DU LEXIQUE ---
     with st.expander("📖 Lexique et Guide des Paramètres"):
         st.markdown("""
-        ### Paramètres Clés
-        * **Levier Brut :** Capacité d'emprunt pour augmenter l'exposition (ex: 1.25x = 25% de levier).
-        * **Alpha (Délissage) :** Corrige la sous-estimation du risque des actifs privés qui ne sont pas évalués quotidiennement.
-        * **Spread (bps) :** Coût d'emprunt additionnel (100 bps = 1.00%).
-        ### Indicateurs
-        * **RFG Pondéré :** Moyenne des frais de gestion de tous les FNB selon votre allocation.
-        * **Ratio de Sharpe :** Performance par unité de risque (plus il est haut, mieux c'est).
-        * **Unhedged :** Exposition totale à la devise étrangère (protection naturelle en cas de crise).
+        ### Paramètres de Gouvernance
+        * **Levier Brut Max :** Taille maximale du portefeuille incluant l'emprunt. 1.25x signifie que vous investissez 25% de plus que votre capital propre.
+        * **Max Alternatifs Globaux :** Plafond cumulé pour les classes d'actifs illiquides (Immobilier, Infra, Dette Privée). Essentiel pour la gestion des besoins de liquidité du fonds.
+        * **Alpha (Délissage) :** Ajustement statistique qui 'gonfle' la volatilité des actifs privés pour refléter leur risque réel, souvent masqué par l'absence d'évaluation quotidienne.
+        * **Spread Levier (bps) :** Coût additionnel d'emprunt (ex: 120 bps = 1.20% au-dessus du taux sans risque).
+        
+        ### Indicateurs de Sortie
+        * **RFG Pondéré :** Le coût total moyen des frais de gestion de vos FNB, calculé selon votre allocation.
+        * **Unhedged (Non-couvert) :** Stratégie conservée ici où l'on accepte la fluctuation des devises étrangères pour bénéficier de leur effet protecteur en cas de krach boursier.
         """)
 
     st.header("📊 Politique de Placement (Bornes Min/Max)")
