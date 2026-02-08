@@ -28,12 +28,14 @@ def get_market_data():
     return returns
 
 # --- 2. LOGIQUE DE DÉLISSAGE (Geltner Model) ---
-def desmooth_cov(cov, alpha, pe_idx=3, re_idx=4):
+def desmooth_cov(cov, alpha, assets_to_desmooth=['Private Equity Proxy', 'Immobilier']):
+    """Ajuste la covariance en cherchant les actifs par leur nom."""
     adj_cov = cov.copy()
     adj_factor = 1 / alpha
-    for idx in [pe_idx, re_idx]:
-        adj_cov.iloc[idx, :] *= adj_factor
-        adj_cov.iloc[:, idx] *= adj_factor
+    for asset in assets_to_desmooth:
+        if asset in adj_cov.index:
+            adj_cov.loc[asset, :] *= adj_factor
+            adj_cov.loc[:, asset] *= adj_factor
     return adj_cov
 
 # --- 3. MOTEUR D'OPTIMISATION (CVXPY) ---
@@ -44,12 +46,16 @@ def optimize_portfolio(returns, cov, lev_limit, target_ret, borrow_cost, max_sin
     net_return = w @ returns.values - (lev_amt * borrow_cost)
     risk = cp.quad_form(w, cov.values)
     
+   # On identifie les positions dynamiquement
+    idx_pe = list(returns.index).index('Private Equity Proxy')
+    idx_re = list(returns.index).index('Immobilier')
+    
     constraints = [
         cp.sum(w) <= lev_limit,
         cp.sum(w) >= 1.0,
         w >= 0,
         w <= max_single,
-        cp.sum(w[[3, 4]]) <= max_illiquid,
+        w[idx_pe] + w[idx_re] <= max_illiquid, # Utilise les bons indices
         net_return >= target_ret
     ]
     
