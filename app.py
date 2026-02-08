@@ -123,6 +123,24 @@ try:
             
         st.subheader("📊 Croissance Historique du Portefeuille")
         st.line_chart((1 + hist_rets.dot(w_opt)).cumprod() * 100)
+    # --- NOUVELLE SECTION : ANALYSE DES BAISSES (DRAWDOWN) ---
+        st.divider()
+        st.subheader("📉 Analyse de la Résilience (Drawdown)")
+        
+        # Calcul du Drawdown
+        cum_growth = (1 + portfolio_returns).cumprod()
+        running_max = cum_growth.cummax()
+        drawdown = (cum_growth - running_max) / running_max * 100
+        
+        # Graphique de Drawdown avec Plotly pour plus de précision
+        fig_dd = px.area(x=drawdown.index, y=drawdown.values, 
+                         title="Perte Maximale Historique (Baisse du sommet au creux %)",
+                         labels={'x': 'Date', 'y': 'Baisse (%)'},
+                         color_discrete_sequence=['#e74c3c'])
+        st.plotly_chart(fig_dd, use_container_width=True)
+        
+        st.info("💡 Un drawdown moins profond qu'un portefeuille 60/40 classique indique que votre diversification (Infrastructures, Dette Privée) et l'absence de hedge de devise jouent leur rôle protecteur.")
+    
     else:
         st.warning("⚠️ Contraintes trop strictes. Solution impossible.")
 
