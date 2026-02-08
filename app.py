@@ -8,11 +8,12 @@ import yfinance as yf
 
 st.set_page_config(page_title="Stratégie Pension Canada", layout="wide")
 
-# --- 1. CONFIGURATION ---
+# --- 1. CONFIGURATION DES ACTIFS ---
 TICKERS_DICT = {
     "Actions US (Unhedged)": "VFV.TO",
     "Actions Mondiales (Unhedged)": "VXC.TO",
-    "Marchés Émergents": "VEE.TO",
+    "Marchés Émergents (Actions)": "VEE.TO",
+    "Dette Marchés Émergents": "VWOB",
     "Infrastructures": "ZGI.TO",
     "Immobilier Listé": "VRE.TO",
     "Matières Premières": "DBC",
@@ -24,9 +25,9 @@ TICKERS_DICT = {
 }
 
 DEFAULT_MER = {
-    "VFV.TO": 0.0009, "VXC.TO": 0.0021, "VEE.TO": 0.0024, "ZGI.TO": 0.0061,
-    "VRE.TO": 0.0039, "DBC": 0.0085, "XSU.TO": 0.0033, "VAB.TO": 0.0009,
-    "XHY.TO": 0.0061, "XCB.TO": 0.0018, "PSA.TO": 0.0015
+    "VFV.TO": 0.0009, "VXC.TO": 0.0021, "VEE.TO": 0.0024, "VWOB": 0.0020,
+    "ZGI.TO": 0.0061, "VRE.TO": 0.0039, "DBC": 0.0085, "XSU.TO": 0.0033, 
+    "VAB.TO": 0.0009, "XHY.TO": 0.0061, "XCB.TO": 0.0018, "PSA.TO": 0.0015
 }
 
 ILLIQUID_ASSETS = ["Infrastructures", "Dette Privée (Proxy)", "Hypothèques Comm. (Proxy)", "Immobilier Listé"]
@@ -52,20 +53,12 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     lev_amt = cp.sum(w) - 1
     net_return = w @ returns_series.values - (lev_amt * borrow_cost)
     risk = cp.quad_form(w, cov_matrix.values)
-    
-    constraints = [
-        cp.sum(w) <= lev_limit, 
-        cp.sum(w) >= 1.0, 
-        net_return >= target_ret
-    ]
-    
+    constraints = [cp.sum(w) <= lev_limit, cp.sum(w) >= 1.0, net_return >= target_ret]
     for i, name in enumerate(returns_series.index):
         constraints.append(w[i] >= asset_bounds[name][0])
         constraints.append(w[i] <= asset_bounds[name][1])
-        
     ill_idx = [i for i, name in enumerate(returns_series.index) if name in illiquid_list]
     constraints.append(cp.sum(w[ill_idx]) <= max_ill_limit)
-    
     prob = cp.Problem(cp.Minimize(risk), constraints)
     try:
         prob.solve(solver=cp.OSQP)
@@ -75,7 +68,7 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
 
 # --- 2. INTERFACE ---
 st.title("🏛️ Station de Recherche : Portefeuille Institutionnel")
-tab_main, tab_arch = st.tabs(["📊 Optimisation et Analyse", "🔍 Architecture et Frais"])
+tab_main, tab_corr, tab_arch = st.tabs(["📊 Optimisation et Analyse", "📈 Corrélations", "🔍 Architecture et Frais"])
 
 with st.sidebar:
     st.header("⚙️ Configuration")
@@ -84,53 +77,45 @@ with st.sidebar:
     alpha = st.slider("Alpha (Délissage)", 0.3, 1.0, 0.5)
     max_i = st.slider("Max Alternatifs (%)", 10, 80, 45) / 100
     spread_bps = st.number_input("Spread Levier (bps)", value=120)
-    
-    st.header("🔮 Anticipations (CMA)")
     mode_cma = st.radio("Source CMA :", ["Historique", "Manuel"])
     user_rets, user_vols = {}, {}
     if mode_cma == "Manuel":
         for asset in TICKERS_DICT.keys():
             user_rets[asset] = st.number_input(f"Rend. {asset} %", value=7.0, step=0.1, key=f"r_{asset}") / 100
             user_vols[asset] = st.number_input(f"Vol. {asset} %", value=12.0, step=0.1, key=f"v_{asset}") / 100
-
-    st.header("💸 Frais Manuels (RFG)")
     custom_fees = {}
     for asset, ticker in TICKERS_DICT.items():
         custom_fees[asset] = st.number_input(f"Frais {asset} (%)", value=DEFAULT_MER[ticker]*100, step=0.05, key=f"fee_{asset}") / 100
 
-with tab_arch:
-    st.header("Architecture des Données et Frais Appliqués")
-    st.table(pd.DataFrame([{"Classe": k, "Ticker": TICKERS_DICT[k], "Frais (%)": f"{custom_fees[k]:.3%}"} for k in TICKERS_DICT.keys()]))
+try:
+    hist_data = get_market_data(TICKERS_DICT)
+    corr = hist_data.corr()
 
-with tab_main:
-    with st.expander("📖 Lexique et Guide"):
-        st.markdown("""
-        * **Rendement Net :** Après frais de gestion et coût du levier.
-        * **Carry Levier :** Profitabilité de l'emprunt (Rendement actif - Coût crédit).
-        * **Alpha :** Correction de volatilité pour les actifs illiquides.
-        """)
+    with tab_corr:
+        st.plotly_chart(px.imshow(corr, text_auto=".2f", color_continuous_scale='RdBu_r', title="Matrice de Corrélation"), use_container_width=True)
 
-    st.header("📊 Bornes de Placement")
-    asset_bounds = {}
-    cols = st.columns(4)
-    for i, asset in enumerate(TICKERS_DICT.keys()):
-        with cols[i % 4]:
-            b_min = st.number_input(f"Min {asset} %", 0, 100, 0, key=f"nmin_{asset}") / 100
-            default_max = 80 if asset == "Actions Mondiales (Unhedged)" else 40
-            b_max = st.number_input(f"Max {asset} %", 0, 100, default_max, key=f"nmax_{asset}") / 100
-            asset_bounds[asset] = (b_min, b_max)
+    with tab_arch:
+        st.table(pd.DataFrame([{"Classe": k, "Ticker": TICKERS_DICT[k], "Frais (%)": f"{custom_fees[k]:.3%}"} for k in TICKERS_DICT.keys()]))
 
-    try:
-        hist_data = get_market_data(TICKERS_DICT)
+    with tab_main:
+        st.header("📊 Bornes de Placement")
+        asset_bounds = {}
+        cols = st.columns(4)
+        for i, asset in enumerate(TICKERS_DICT.keys()):
+            with cols[i % 4]:
+                b_min = st.number_input(f"Min {asset} %", 0, 100, 0, key=f"nmin_{asset}") / 100
+                default_max = 80 if "Mondiales" in asset else 40
+                b_max = st.number_input(f"Max {asset} %", 0, 100, default_max, key=f"nmax_{asset}") / 100
+                asset_bounds[asset] = (b_min, b_max)
+
         rfr = (1 + hist_data["Cash (RFR)"].mean())**12 - 1
         borrow_cost = rfr + (spread_bps / 10000)
-
         exp_raw = pd.Series(user_rets) if mode_cma == "Manuel" else hist_data.mean() * 12
         exp_rets = exp_raw - pd.Series(custom_fees)
         
         if mode_cma == "Manuel":
             v_diag = np.diag([user_vols[asset] for asset in hist_data.columns])
-            adj_cov_base = pd.DataFrame(v_diag @ hist_data.corr().values @ v_diag, index=hist_data.columns, columns=hist_data.columns)
+            adj_cov_base = pd.DataFrame(v_diag @ corr.values @ v_diag, index=hist_data.columns, columns=hist_data.columns)
         else:
             adj_cov_base = hist_data.cov() * 12
 
@@ -138,36 +123,54 @@ with tab_main:
         w_opt = optimize_portfolio(exp_rets, adj_cov, lev_max, target_r, borrow_cost, asset_bounds, max_i, ILLIQUID_ASSETS)
 
         if w_opt is not None:
-            lev_amt = np.sum(w_opt) - 1
-            port_ret_net = (w_opt @ exp_rets) - (lev_amt * borrow_cost)
+            port_ret_net = (w_opt @ exp_rets) - ((np.sum(w_opt)-1) * borrow_cost)
             port_vol = np.sqrt(w_opt.T @ adj_cov @ w_opt)
-            weighted_mer = np.sum(w_opt * pd.Series(custom_fees))
-            carry = (w_opt @ exp_rets / np.sum(w_opt)) - borrow_cost
-
+            risk_contrib = (w_opt * (adj_cov @ w_opt)) / (port_vol**2)
+            
             st.divider()
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Rendement Net", f"{port_ret_net:.2%}")
             m2.metric("Volatilité", f"{port_vol:.2%}")
-            m3.metric("Frais Totaux", f"{weighted_mer:.2%}")
-            m4.metric("Carry Levier", f"{carry:+.2%}")
+            m3.metric("Frais Totaux", f"{np.sum(w_opt * pd.Series(custom_fees)):.2%}")
+            m4.metric("Carry Levier", f"{(w_opt @ exp_rets / np.sum(w_opt)) - borrow_cost:+.2%}")
 
-            # Frontière Efficiente
-            st.subheader("📈 Frontière Risque-Rendement")
-            t_range = np.linspace(0.04, 0.12, 10)
-            f_vols, f_rets = [], []
-            for r in t_range:
-                wt = optimize_portfolio(exp_rets, adj_cov, lev_max, r, borrow_cost, asset_bounds, max_i, ILLIQUID_ASSETS)
-                if wt is not None:
-                    f_rets.append((wt @ exp_rets) - ((np.sum(wt)-1)*borrow_cost))
-                    f_vols.append(np.sqrt(wt.T @ adj_cov @ wt))
-            fig_ef = px.line(x=f_vols, y=f_rets, title="Efficience du Portefeuille", labels={'x':'Volatilité','y':'Rendement Net'})
-            fig_ef.add_scatter(x=[port_vol], y=[port_ret_net], name="Ma Sélection", marker=dict(size=12, color='red'))
-            st.plotly_chart(fig_ef, use_container_width=True)
+            # --- EXPORTATION ---
+            export_df = pd.DataFrame({
+                "Classe d'Actif": hist_data.columns,
+                "Poids Capital (%)": (w_opt * 100).round(2),
+                "Contrib. Risque (%)": (risk_contrib * 100).round(2),
+                "Rendement Attendu (%)": (exp_rets.values * 100).round(2),
+                "Frais Appliqués (%)": (pd.Series(custom_fees).values * 100).round(2)
+            })
+            
+            csv = export_df.to_csv(index=False).encode('utf-8')
+            st.download_button(label="📥 Télécharger l'Allocation (CSV)", data=csv, file_name='allocation_pension.csv', mime='text/csv')
 
+            # --- ANALYSE ---
+            st.subheader("⚖️ Analyse Capital vs Risque")
+            comparison_df = pd.DataFrame({
+                "Classe d'Actif": hist_data.columns,
+                "Allocation Capital (%)": w_opt * 100,
+                "Contribution au Risque (%)": risk_contrib * 100
+            })
+            fig_risk = px.bar(comparison_df, x="Classe d'Actif", y=["Allocation Capital (%)", "Contribution au Risque (%)"],
+                              barmode="group", title="D'où provient votre risque ?")
+            st.plotly_chart(fig_risk, use_container_width=True)
+
+            st.divider()
             cola, colb = st.columns(2)
-            with cola: st.plotly_chart(px.pie(values=w_opt, names=hist_data.columns, title="Allocation Capital", hole=0.4), use_container_width=True)
-            with colb: st.plotly_chart(px.bar(x=hist_data.columns, y=w_opt*100, title="Poids par Actif (%)"), use_container_width=True)
+            with cola: st.plotly_chart(px.pie(values=w_opt, names=hist_data.columns, title="Répartition du Capital", hole=0.4), use_container_width=True)
+            with colb: 
+                t_range = np.linspace(0.04, 0.12, 10)
+                f_vols, f_rets = [], []
+                for r in t_range:
+                    wt = optimize_portfolio(exp_rets, adj_cov, lev_max, r, borrow_cost, asset_bounds, max_i, ILLIQUID_ASSETS)
+                    if wt is not None:
+                        f_rets.append((wt @ exp_rets) - ((np.sum(wt)-1)*borrow_cost))
+                        f_vols.append(np.sqrt(wt.T @ adj_cov @ wt))
+                st.plotly_chart(px.line(x=f_vols, y=f_rets, title="Efficience", labels={'x':'Vol','y':'Rend'}), use_container_width=True)
+
         else:
-            st.error("⚠️ Pas de solution trouvée. Élargissez vos bornes Max.")
-    except Exception as e:
-        st.error(f"Erreur : {e}")
+            st.error("⚠️ Pas de solution trouvée.")
+except Exception as e:
+    st.error(f"Erreur : {e}")
