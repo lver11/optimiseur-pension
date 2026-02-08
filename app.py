@@ -44,44 +44,24 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     w = cp.Variable(n)
     lev_amt = cp.sum(w) - 1
     net_return = w @ returns_series.values - (lev_amt * borrow_cost)
-    
-    # --- STABILISATION NUMÉRIQUE AVANCÉE ---
-    S = (cov_matrix.values + cov_matrix.values.T) / 2
-    S += np.eye(n) * 1e-5  # Régularisation plus forte pour aider la convergence
-    
-    # cp.psd_wrap est crucial pour les solveurs comme ECOS
+    S = (cov_matrix.values + cov_matrix.values.T) / 2 + np.eye(n) * 1e-5
     risk = cp.quad_form(w, cp.psd_wrap(S))
-    
-    constraints = [
-        cp.sum(w) <= lev_limit, 
-        cp.sum(w) >= 1.0, 
-        net_return >= target_ret,
-        w >= 0
-    ]
-    
+    constraints = [cp.sum(w) <= lev_limit, cp.sum(w) >= 1.0, net_return >= target_ret, w >= 0]
     for i, name in enumerate(returns_series.index):
         constraints.append(w[i] >= asset_bounds[name][0])
         constraints.append(w[i] <= asset_bounds[name][1])
-    
     ill_idx = [i for i, name in enumerate(returns_series.index) if name in illiquid_list]
     constraints.append(cp.sum(w[ill_idx]) <= max_ill_limit)
-    
     prob = cp.Problem(cp.Minimize(risk), constraints)
-    
-    # ESSAI DE PLUSIEURS SOLVEURS
     try:
-        prob.solve(solver=cp.ECOS, max_iters=500)
+        prob.solve(solver=cp.ECOS)
     except:
-        try:
-            prob.solve(solver=cp.SCS, max_iters=2000)
-        except:
-            prob.solve(solver=cp.OSQP, verbose=False)
-            
+        prob.solve(solver=cp.OSQP)
     return w.value if w.value is not None else None
 
 # --- 2. INTERFACE ---
 st.title("🏛️ Station de Recherche : Portefeuille Institutionnel")
-tab_opt, tab_risk, tab_lex = st.tabs(["📊 Optimisation", "📈 Risque & Matrice", "🔍 Lexique"])
+tab_opt, tab_risk, tab_lex = st.tabs(["📊 Optimisation", "📈 Corrélations & Risque", "🔍 Lexique"])
 
 with st.sidebar:
     st.header("⚙️ Configuration")
@@ -93,18 +73,31 @@ with st.sidebar:
     mode_cma = st.radio("Source CMA :", ["Historique", "Manuel"])
 
 with tab_lex:
-    st.header("📖 Lexique et Guide")
-    st.markdown("""
-    * **Rendement Net :** Profit après déduction des frais de gestion et du coût du levier.
-    * **Carry Levier :** Efficacité du financement (Rendement actif - Coût crédit).
-    * **Alpha (Délissage) :** Ajustement de la volatilité pour les actifs non-évalués quotidiennement.
-    """)
-    applied_fees = {}
-    st.divider()
-    cols_f = st.columns(3)
-    for i, (asset, ticker) in enumerate(TICKERS_DICT.items()):
-        with cols_f[i % 3]:
-            applied_fees[asset] = st.number_input(f"Frais {asset} (%)", value=DEFAULT_MER[ticker]*100, step=0.01, key=f"f_{asset}") / 100
+    st.header("📖 Lexique")
+    st.markdown("* **TPA :** Total Portfolio Approach.")
+    applied_fees = {a: st.number_input(f"Frais {a} %", DEFAULT_MER[TICKERS_DICT[a]]*100, key=f"f_{a}")/100 for a in TICKERS_DICT.keys()}
+
+with tab_risk:
+    try:
+        data = get_market_data(TICKERS_DICT)
+        st.header("📈 Matrice de Corrélation Historique (Détaillée)")
+        
+        # --- AGRANDISSEMENT DE LA MATRICE ---
+        corr_matrix = data.corr()
+        fig_corr = px.imshow(
+            corr_matrix, 
+            text_auto=".2f", 
+            color_continuous_scale='RdBu_r',
+            labels=dict(color="Corrélation"),
+            aspect="auto"
+        )
+        # Forcer la hauteur à 800px et ajuster les marges pour la lisibilité
+        fig_corr.update_layout(height=800, margin=dict(l=20, r=20, t=30, b=20))
+        st.plotly_chart(fig_corr, use_container_width=True)
+        
+        st.info("💡 Une matrice large permet de mieux identifier les îlots de diversification, particulièrement entre les actifs 'Unhedged' et les obligations.")
+    except Exception as e:
+        st.error(f"Erreur data : {e}")
 
 with tab_opt:
     st.header("📊 Bornes de Placement")
@@ -118,24 +111,14 @@ with tab_opt:
             asset_bounds[asset] = (b_min, b_max)
 
     try:
-        data = get_market_data(TICKERS_DICT)
         rfr = (1 + data["Cash (RFR)"].mean())**12 - 1
         borrow_cost = rfr + (spread_bps / 10000)
-
-        if mode_cma == "Manuel":
-            exp_raw = pd.Series([st.sidebar.number_input(f"Rend. {a} %", 0.0, 20.0, 7.0, key=f"r_{a}")/100 for a in TICKERS_DICT.keys()], index=TICKERS_DICT.keys())
-            vols = [st.sidebar.number_input(f"Vol. {a} %", 0.0, 40.0, 12.0, key=f"v_{a}")/100 for a in TICKERS_DICT.keys()]
-            cov_base = pd.DataFrame(np.diag(vols) @ data.corr().values @ np.diag(vols), index=data.columns, columns=data.columns)
-        else:
-            exp_raw = data.mean() * 12
-            cov_base = data.cov() * 12
-
-        exp_rets = exp_raw - pd.Series(applied_fees)
+        exp_rets = (data.mean() * 12) - pd.Series(applied_fees)
+        cov_base = data.cov() * 12
         for a in ILLIQUID_ASSETS:
             cov_base.loc[a, :], cov_base.loc[:, a] = cov_base.loc[a, :] * (1/alpha), cov_base.loc[:, a] * (1/alpha)
 
         w_opt = optimize_portfolio(exp_rets, cov_base, lev_max, target_r, borrow_cost, asset_bounds, max_i, ILLIQUID_ASSETS)
-
         if w_opt is not None:
             w_opt = np.array([x if x > 0.001 else 0 for x in w_opt])
             st.divider()
@@ -150,7 +133,7 @@ with tab_opt:
             c_pie, c_ef = st.columns(2)
             with c_pie:
                 df_p = pd.DataFrame({"Actif": list(TICKERS_DICT.keys()), "Poids": w_opt})
-                fig = px.pie(df_p[df_p["Poids"]>0], values="Poids", names="Actif", hole=0.4, title="Allocation Optimale")
+                fig = px.pie(df_p[df_p["Poids"]>0], values="Poids", names="Actif", hole=0.4, title="Allocation")
                 fig.update_traces(textinfo='percent+label')
                 st.plotly_chart(fig, use_container_width=True)
             with c_ef:
@@ -162,14 +145,4 @@ with tab_opt:
                         f_rets.append((wt @ exp_rets) - ((np.sum(wt)-1)*borrow_cost))
                         f_vols.append(np.sqrt(wt.T @ cov_base @ wt))
                 st.plotly_chart(px.line(x=f_vols, y=f_rets, title="Frontière Efficiente", labels={'x':'Vol','y':'Rend'}), use_container_width=True)
-        else:
-            st.error("⚠️ Impossible de converger vers une solution. Vérifiez la cohérence entre votre cible de rendement et vos bornes Min/Max.")
-
-    except Exception as e:
-        st.error(f"Erreur technique : {e}")
-
-with tab_risk:
-    if 'data' in locals():
-        st.header("📈 Corrélations Historiques")
-        st.plotly_chart(px.imshow(data.corr(), text_auto=".2f", color_continuous_scale='RdBu_r'), use_container_width=True)
-        
+    except Exception as e: st.error(f"Erreur : {e}")
