@@ -45,12 +45,11 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     lev_amt = cp.sum(w) - 1
     net_return = w @ returns_series.values - (lev_amt * borrow_cost)
     
-    # --- SOLUTION RADICALE POUR DCP ---
-    # 1. Forcer la symétrie parfaite
+    # --- STABILISATION NUMÉRIQUE AVANCÉE ---
     S = (cov_matrix.values + cov_matrix.values.T) / 2
-    # 2. Ajouter une régularisation plus forte (1e-6) pour garantir la courbure convexe
-    S += np.eye(n) * 1e-6
+    S += np.eye(n) * 1e-5  # Régularisation plus forte pour aider la convergence
     
+    # cp.psd_wrap est crucial pour les solveurs comme ECOS
     risk = cp.quad_form(w, cp.psd_wrap(S))
     
     constraints = [
@@ -68,12 +67,16 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     constraints.append(cp.sum(w[ill_idx]) <= max_ill_limit)
     
     prob = cp.Problem(cp.Minimize(risk), constraints)
-    # Utilisation de ECOS ou OSQP selon disponibilité, ECOS est souvent plus précis pour QuadForm
+    
+    # ESSAI DE PLUSIEURS SOLVEURS
     try:
-        prob.solve(solver=cp.ECOS)
+        prob.solve(solver=cp.ECOS, max_iters=500)
     except:
-        prob.solve(solver=cp.OSQP)
-        
+        try:
+            prob.solve(solver=cp.SCS, max_iters=2000)
+        except:
+            prob.solve(solver=cp.OSQP, verbose=False)
+            
     return w.value if w.value is not None else None
 
 # --- 2. INTERFACE ---
@@ -90,11 +93,11 @@ with st.sidebar:
     mode_cma = st.radio("Source CMA :", ["Historique", "Manuel"])
 
 with tab_lex:
-    st.header("📖 Lexique et Architecture")
+    st.header("📖 Lexique et Guide")
     st.markdown("""
-    * **Levier Brut :** Exposition totale (Capital + Emprunt).
-    * **Alpha :** Correction de volatilité pour les actifs privés.
-    * **DCP :** Norme mathématique de convexité.
+    * **Rendement Net :** Profit après déduction des frais de gestion et du coût du levier.
+    * **Carry Levier :** Efficacité du financement (Rendement actif - Coût crédit).
+    * **Alpha (Délissage) :** Ajustement de la volatilité pour les actifs non-évalués quotidiennement.
     """)
     applied_fees = {}
     st.divider()
@@ -147,7 +150,7 @@ with tab_opt:
             c_pie, c_ef = st.columns(2)
             with c_pie:
                 df_p = pd.DataFrame({"Actif": list(TICKERS_DICT.keys()), "Poids": w_opt})
-                fig = px.pie(df_p[df_p["Poids"]>0], values="Poids", names="Actif", hole=0.4, title="Allocation")
+                fig = px.pie(df_p[df_p["Poids"]>0], values="Poids", names="Actif", hole=0.4, title="Allocation Optimale")
                 fig.update_traces(textinfo='percent+label')
                 st.plotly_chart(fig, use_container_width=True)
             with c_ef:
@@ -160,12 +163,13 @@ with tab_opt:
                         f_vols.append(np.sqrt(wt.T @ cov_base @ wt))
                 st.plotly_chart(px.line(x=f_vols, y=f_rets, title="Frontière Efficiente", labels={'x':'Vol','y':'Rend'}), use_container_width=True)
         else:
-            st.error("⚠️ Pas de solution. Vérifiez vos bornes.")
+            st.error("⚠️ Impossible de converger vers une solution. Vérifiez la cohérence entre votre cible de rendement et vos bornes Min/Max.")
 
     except Exception as e:
-        st.error(f"Erreur : {e}")
+        st.error(f"Erreur technique : {e}")
 
 with tab_risk:
     if 'data' in locals():
-        st.header("📈 Matrice de Corrélation")
+        st.header("📈 Corrélations Historiques")
         st.plotly_chart(px.imshow(data.corr(), text_auto=".2f", color_continuous_scale='RdBu_r'), use_container_width=True)
+        
