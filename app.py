@@ -101,15 +101,10 @@ with tab_arch:
 with tab_main:
     with st.expander("📖 Lexique et Guide des Paramètres"):
         st.markdown("""
-        ### Paramètres de Gouvernance
-        * **Levier Brut Max :** Taille maximale du portefeuille incluant l'emprunt. 1.25x signifie que vous investissez 25% de plus que votre capital propre.
-        * **Max Alternatifs Globaux :** Plafond cumulé pour les classes d'actifs illiquides (Immobilier, Infra, Dette Privée). Essentiel pour la gestion des besoins de liquidité du fonds.
-        * **Alpha (Délissage) :** Ajustement statistique qui 'gonfle' la volatilité des actifs privés pour refléter leur risque réel, souvent masqué par l'absence d'évaluation quotidienne.
-        * **Spread Levier (bps) :** Coût additionnel d'emprunt (ex: 120 bps = 1.20% au-dessus du taux sans risque).
-        
-        ### Indicateurs de Sortie
-        * **RFG Pondéré :** Le coût total moyen des frais de gestion de vos FNB, calculé selon votre allocation.
-        * **Unhedged (Non-couvert) :** Stratégie conservée ici où l'on accepte la fluctuation des devises étrangères pour bénéficier de leur effet protecteur en cas de krach boursier.
+        ### Analyse du Levier
+        * **Rendement Brut du Levier :** Rendement généré par les actifs achetés avec l'argent emprunté.
+        * **Coût du Financement :** Taux d'intérêt total payé sur l'emprunt (Taux sans risque + Spread).
+        * **Carry Net (Levier) :** La différence entre le rendement des actifs et le coût de l'emprunt. Si c'est positif, le levier crée de la valeur.
         """)
 
     st.header("📊 Politique de Placement (Bornes Min/Max)")
@@ -139,24 +134,48 @@ with tab_main:
         w_opt = optimize_portfolio(exp_rets, adj_cov, lev_max, target_r, borrow_cost, asset_bounds, max_i, ILLIQUID_ASSETS)
 
         if w_opt is not None:
-            port_ret = w_opt @ exp_rets - (np.sum(w_opt)-1)*borrow_cost
-            port_vol = np.sqrt(w_opt.T @ adj_cov @ w_opt)
-            mer_list = [PROXY_DATA[TICKERS_DICT[asset]]['mer'] for asset in hist_data.columns]
-            weighted_mer = np.sum(w_opt * mer_list)
+            # --- CALCULS DE PERFORMANCE ---
+            lev_size = np.sum(w_opt) - 1
+            gross_port_ret = w_opt @ exp_rets
+            total_interest_cost = lev_size * borrow_cost
+            port_ret_net = gross_port_ret - total_interest_cost
+            
+            # Carry du levier (Rendement pondéré des actifs / somme des poids - coût emprunt)
+            avg_asset_yield = (w_opt @ exp_rets) / np.sum(w_opt)
+            leverage_carry = avg_asset_yield - borrow_cost
             
             st.divider()
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Rendement Net", f"{port_ret:.2%}")
-            m2.metric("Volatilité Ajustée", f"{port_vol:.2%}")
-            m3.metric("Ratio de Sharpe", f"{(port_ret-rfr)/port_vol:.2f}")
-            m4.metric("Frais Totaux (RFG)", f"{weighted_mer:.2%}")
+            m1.metric("Rendement Net", f"{port_ret_net:.2%}")
+            m2.metric("Volatilité Ajustée", f"{np.sqrt(w_opt.T @ adj_cov @ w_opt):.2%}")
+            m3.metric("Ratio de Sharpe", f"{(port_ret_net-rfr)/np.sqrt(w_opt.T @ adj_cov @ w_opt):.2f}")
+            m4.metric("Carry Net du Levier", f"{leverage_carry:+.2%}", help="Différence entre le rendement moyen des actifs et le coût de l'emprunt.")
+
+            # --- SECTION ANALYSE DU LEVIER ---
+            st.subheader("🕵️ Analyse de la Structure de Rendement")
+            c_lev1, c_lev2 = st.columns(2)
+            with c_lev1:
+                st.write("**Décomposition du Rendement ($)**")
+                lev_data = pd.DataFrame({
+                    "Composante": ["Rendement des Actifs", "Coût de l'Intérêt"],
+                    "Valeur (%)": [gross_port_ret * 100, -total_interest_cost * 100]
+                })
+                st.plotly_chart(px.bar(lev_data, x="Composante", y="Valeur (%)", color="Composante", 
+                                       color_discrete_map={"Rendement des Actifs": "green", "Coût de l'Intérêt": "red"}), use_container_width=True)
+            with c_lev2:
+                st.write("**Efficacité du Levier**")
+                st.info(f"""
+                * **Taille de l'emprunt :** {lev_size:.1%} du capital propre.
+                * **Coût total de l'emprunt :** {borrow_cost:.2%} (Taux {rfr:.2%} + Spread {spread_bps}bps).
+                * **Seuil de rentabilité (Hurdle) :** Vos actifs doivent générer plus de **{borrow_cost:.2%}** pour que le levier soit profitable.
+                """)
 
             cola, colb = st.columns(2)
             with cola:
                 st.plotly_chart(px.pie(values=w_opt, names=hist_data.columns, title="Allocation Capital", hole=0.4), use_container_width=True)
             with colb:
-                fee_impact = w_opt * mer_list
-                st.plotly_chart(px.bar(x=hist_data.columns, y=fee_impact*100, title="Coût par Actif (bps)"), use_container_width=True)
+                risk_contrib = (w_opt * (adj_cov @ w_opt)) / (w_opt.T @ adj_cov @ w_opt)
+                st.plotly_chart(px.pie(values=risk_contrib, names=hist_data.columns, title="Allocation Risque", hole=0.4), use_container_width=True)
 
             st.divider()
             st.subheader("🏁 Performance Historique vs 60/40")
