@@ -23,7 +23,7 @@ TICKERS_DICT = {
     "Cash (RFR)": "PSA.TO"
 }
 
-# Données des frais (MER en format décimal pour le calcul)
+# Données des frais (MER)
 PROXY_DATA = {
     "VFV.TO": {"desc": "Vanguard S&P 500", "mer": 0.0009},
     "VXC.TO": {"desc": "Vanguard Global All Cap", "mer": 0.0021},
@@ -40,10 +40,11 @@ PROXY_DATA = {
 
 ILLIQUID_ASSETS = ["Infrastructures", "Dette Privée (Proxy)", "Hypothèques Comm. (Proxy)", "Immobilier Listé"]
 
-# --- 2. FONCTIONS ---
+# --- 2. FONCTIONS DE CALCUL ---
 @st.cache_data
 def get_market_data(tickers):
-    raw_data = yf.download(list(tickers.values()), period="10y", interval="1mo")
+    tickers_list = list(tickers.values())
+    raw_data = yf.download(tickers_list, period="10y", interval="1mo")
     data = raw_data['Adj Close'] if 'Adj Close' in raw_data.columns else raw_data['Close']
     returns = data.pct_change().dropna()
     inv_tickers = {v: k for k, v in tickers.items()}
@@ -74,9 +75,11 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     prob.solve()
     return w.value if w.value is not None else None
 
-# --- 3. INTERFACE ---
+# --- 3. INTERFACE UTILISATEUR ---
 st.title("🏛️ Station de Recherche : Portefeuille Institutionnel")
-tab_main, tab_arch = st.tabs(["📊 Optimisation", "🔍 Architecture et Frais"])
+
+# Onglets
+tab_main, tab_arch = st.tabs(["📊 Optimisation et Analyse", "🔍 Architecture et Frais"])
 
 with st.sidebar:
     st.header("⚙️ Configuration")
@@ -93,12 +96,25 @@ with st.sidebar:
             user_vols[asset] = st.number_input(f"Vol. {asset} %", value=12.0, step=0.1) / 100
 
 with tab_arch:
-    st.header("Détails des Frais de Gestion (RFG/MER)")
-    proxy_df = pd.DataFrame([{"Classe": k, "Ticker": v, "RFG (MER)": f"{PROXY_DATA[v]['mer']:.2%}"} for k, v in TICKERS_DICT.items()])
+    st.header("Architecture des Données et Frais (RFG/MER)")
+    proxy_df = pd.DataFrame([{"Classe": k, "Ticker": v, "Description": PROXY_DATA[v]['desc'], "RFG (MER)": f"{PROXY_DATA[v]['mer']:.2%}"} for k, v in TICKERS_DICT.items()])
     st.table(proxy_df)
 
 with tab_main:
-    st.header("📊 Bornes de Politique de Placement")
+    # --- RÉINTÉGRATION DU LEXIQUE ---
+    with st.expander("📖 Lexique et Guide des Paramètres"):
+        st.markdown("""
+        ### Paramètres Clés
+        * **Levier Brut :** Capacité d'emprunt pour augmenter l'exposition (ex: 1.25x = 25% de levier).
+        * **Alpha (Délissage) :** Corrige la sous-estimation du risque des actifs privés qui ne sont pas évalués quotidiennement.
+        * **Spread (bps) :** Coût d'emprunt additionnel (100 bps = 1.00%).
+        ### Indicateurs
+        * **RFG Pondéré :** Moyenne des frais de gestion de tous les FNB selon votre allocation.
+        * **Ratio de Sharpe :** Performance par unité de risque (plus il est haut, mieux c'est).
+        * **Unhedged :** Exposition totale à la devise étrangère (protection naturelle en cas de crise).
+        """)
+
+    st.header("📊 Politique de Placement (Bornes Min/Max)")
     asset_bounds = {}
     cols = st.columns(4)
     for i, asset in enumerate(TICKERS_DICT.keys()):
@@ -125,11 +141,8 @@ with tab_main:
         w_opt = optimize_portfolio(exp_rets, adj_cov, lev_max, target_r, borrow_cost, asset_bounds, max_i, ILLIQUID_ASSETS)
 
         if w_opt is not None:
-            # Calculs
             port_ret = w_opt @ exp_rets - (np.sum(w_opt)-1)*borrow_cost
             port_vol = np.sqrt(w_opt.T @ adj_cov @ w_opt)
-            
-            # Calcul des frais pondérés
             mer_list = [PROXY_DATA[TICKERS_DICT[asset]]['mer'] for asset in hist_data.columns]
             weighted_mer = np.sum(w_opt * mer_list)
             
@@ -138,16 +151,14 @@ with tab_main:
             m1.metric("Rendement Net", f"{port_ret:.2%}")
             m2.metric("Volatilité Ajustée", f"{port_vol:.2%}")
             m3.metric("Ratio de Sharpe", f"{(port_ret-rfr)/port_vol:.2f}")
-            m4.metric("Frais Totaux (RFG)", f"{weighted_mer:.2%}", help="Ratio de frais de gestion moyen pondéré selon l'allocation et le levier.")
+            m4.metric("Frais Totaux (RFG)", f"{weighted_mer:.2%}")
 
-            # Graphiques
             cola, colb = st.columns(2)
             with cola:
-                st.plotly_chart(px.pie(values=w_opt, names=hist_data.columns, title="Allocation du Capital", hole=0.4), use_container_width=True)
+                st.plotly_chart(px.pie(values=w_opt, names=hist_data.columns, title="Allocation Capital", hole=0.4), use_container_width=True)
             with colb:
-                # Décomposition des frais : combien chaque ligne coûte en dollars de frais
-                fee_contribution = w_opt * mer_list
-                st.plotly_chart(px.bar(x=hist_data.columns, y=fee_contribution*100, title="Impact des Frais par Classe d'Actif (% du Portefeuille)", labels={'y': 'Coût (bps)', 'x': 'Actif'}), use_container_width=True)
+                fee_impact = w_opt * mer_list
+                st.plotly_chart(px.bar(x=hist_data.columns, y=fee_impact*100, title="Coût par Actif (bps)"), use_container_width=True)
 
             st.divider()
             st.subheader("🏁 Performance Historique vs 60/40")
@@ -155,6 +166,6 @@ with tab_main:
             comp_df = pd.DataFrame({"Optimisé": (1 + hist_data.dot(w_opt)).cumprod() * 100, "60/40": (1 + bench).cumprod() * 100}, index=hist_data.index)
             st.line_chart(comp_df)
         else:
-            st.error("⚠️ Aucune solution trouvée.")
+            st.error("⚠️ Aucune solution trouvée. Ajustez vos bornes.")
     except Exception as e:
         st.error(f"Erreur technique : {e}")
