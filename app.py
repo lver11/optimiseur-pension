@@ -8,6 +8,7 @@ import yfinance as yf
 
 st.set_page_config(page_title="Stratégie Pension Canada", layout="wide")
 
+# --- 1. CONFIGURATION ET LOGIQUE ---
 TICKERS_DICT = {
     "Actions US (Unhedged)": "VFV.TO",
     "Actions Mondiales (Unhedged)": "VXC.TO",
@@ -49,27 +50,17 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     net_return = w @ returns_series.values - (lev_amt * borrow_cost)
     risk = cp.quad_form(w, cov_matrix.values)
     asset_names = list(returns_series.index)
-    
-    # Contraintes de base
-    constraints = [
-        cp.sum(w) <= lev_limit, 
-        cp.sum(w) >= 1.0,
-        net_return >= target_ret
-    ]
-    
-    # Application des bornes par actif (Min/Max)
+    constraints = [cp.sum(w) <= lev_limit, cp.sum(w) >= 1.0, net_return >= target_ret]
     for i, name in enumerate(asset_names):
         constraints.append(w[i] >= asset_bounds[name][0])
         constraints.append(w[i] <= asset_bounds[name][1])
-    
-    # Contrainte globale sur les actifs illiquides
     ill_idx = [i for i, name in enumerate(asset_names) if name in illiquid_list]
     constraints.append(cp.sum(w[ill_idx]) <= max_illiquid)
-    
     prob = cp.Problem(cp.Minimize(risk), constraints)
     prob.solve()
     return w.value if w.value is not None else None
 
+# --- 2. INTERFACE SIDEBAR ---
 st.title("🏛️ Station de Recherche : Portefeuille Institutionnel")
 
 with st.sidebar:
@@ -77,35 +68,48 @@ with st.sidebar:
     lev_max = st.slider("Levier Brut Maximum", 1.0, 2.0, 1.25)
     target_r = st.slider("Cible de Rendement (%)", 4.0, 10.0, 6.5) / 100
     alpha = st.slider("Alpha (Délissage)", 0.3, 1.0, 0.5)
-    
     st.header("⚖️ Limites Alternatifs")
     max_i = st.slider("Plafond Alternatifs Globaux (%)", 10, 80, 45) / 100
-
     st.header("💳 Coût du Financement")
     spread_bps = st.number_input("Spread sur levier (bps)", value=120, step=10)
-
     st.header("🔮 Anticipations (CMA)")
     mode_cma = st.radio("Source :", ["Historique", "Manuel"])
-    
-    user_returns = {}
-    user_vols = {}
+    user_returns, user_vols = {}, {}
     if mode_cma == "Manuel":
         for asset in TICKERS_DICT.keys():
             user_returns[asset] = st.number_input(f"Rend. {asset} %", value=7.0, step=0.5) / 100
             user_vols[asset] = st.number_input(f"Vol. {asset} %", value=12.0, step=0.5) / 100
 
-# --- NOUVELLE SECTION : BORNES PAR ACTIF ---
+# --- 3. LÉGENDE ET GLOSSAIRE ---
+with st.expander("📖 Guide des paramètres et Lexique (Lisez-moi)"):
+    st.markdown("""
+    ### Paramètres de Contrôle
+    * **Levier Brut Maximum :** Définit la taille maximale du portefeuille (1.25x signifie que pour 100$ de capital, vous investissez 125$).
+    * **Cible de Rendement :** L'objectif de performance annuel net du coût de financement.
+    * **Alpha (Délissage) :** Ajuste la volatilité des actifs non cotés. Un alpha de 0.5 signifie que nous estimons que la volatilité réelle est le double de la volatilité comptable observée.
+    * **Spread sur levier (bps) :** Le coût additionnel que votre banque vous charge au-dessus du taux sans risque pour emprunter.
+    
+    ### Métriques de Performance
+    * **Volatilité Ajustée :** Mesure du risque annuel. Plus elle est élevée, plus les fluctuations sont fortes. Elle inclut la correction de l'Alpha.
+    * **Ratio de Sharpe :** Indique le rendement obtenu par unité de risque. Plus il est élevé, plus le portefeuille est efficient.
+    * **Drawdown (Baisse) :** La perte maximale historique enregistrée entre un sommet et un creux.
+    
+    ### Classes d'Actifs
+    * **Unhedged :** Signifie que la devise n'est pas protégée. Vous profitez de la hausse de l'USD face au CAD lors des crises.
+    * **Proxys :** FNB liquides utilisés pour simuler des actifs privés (Dette, Hypothèques) sur la base de leurs caractéristiques de risque similaires.
+    """)
+
+# --- 4. BORNES PAR ACTIF ---
 st.header("📊 Politique de Placement (Bornes Min/Max)")
-st.info("Définissez les poids minimum et maximum autorisés pour chaque classe d'actif.")
 asset_bounds = {}
 cols = st.columns(4)
 for i, asset in enumerate(TICKERS_DICT.keys()):
     with cols[i % 4]:
-        st.subheader(asset)
-        b_min = st.number_input(f"Min {asset} (%)", value=0, min_value=0, max_value=100, key=f"min_{asset}") / 100
-        b_max = st.number_input(f"Max {asset} (%)", value=25, min_value=0, max_value=100, key=f"max_{asset}") / 100
+        b_min = st.number_input(f"Min {asset} (%)", 0, 100, 0, key=f"min_{asset}") / 100
+        b_max = st.number_input(f"Max {asset} (%)", 0, 100, 25, key=f"max_{asset}") / 100
         asset_bounds[asset] = (b_min, b_max)
 
+# --- 5. CALCULS ET AFFICHAGE ---
 try:
     hist_rets = get_market_data(TICKERS_DICT)
     corr_matrix = hist_rets.corr()
@@ -122,7 +126,6 @@ try:
         adj_cov_base = hist_rets.cov() * 12
 
     adj_cov = desmooth_cov(adj_cov_base, alpha, ILLIQUID_ASSETS)
-
     w_opt = optimize_portfolio(exp_rets, adj_cov, lev_max, target_r, borrow_cost, asset_bounds, max_i, ILLIQUID_ASSETS)
 
     if w_opt is not None:
@@ -136,22 +139,7 @@ try:
         m2.metric("Volatilité Ajustée", f"{port_vol:.2%}")
         m3.metric("Ratio de Sharpe", f"{(port_ret-rfr)/port_vol:.2f}")
 
-        # Frontière Efficiente
-        st.divider()
-        st.subheader("📈 Frontière Efficiente")
-        target_range = np.linspace(max(0.02, exp_rets.min()), min(0.15, exp_rets.max()*lev_max), 10)
-        f_vols, f_rets = [], []
-        for r in target_range:
-            w_tmp = optimize_portfolio(exp_rets, adj_cov, lev_max, r, borrow_cost, asset_bounds, max_i, ILLIQUID_ASSETS)
-            if w_tmp is not None:
-                f_rets.append(w_tmp @ exp_rets - (np.sum(w_tmp)-1)*borrow_cost)
-                f_vols.append(np.sqrt(w_tmp.T @ adj_cov @ w_tmp))
-        
-        fig_ef = go.Figure()
-        fig_ef.add_trace(go.Scatter(x=f_vols, y=f_rets, mode='lines+markers', name='Frontière', line=dict(color='gold')))
-        fig_ef.add_trace(go.Scatter(x=[port_vol], y=[port_ret], mode='markers', name='Sélection', marker=dict(color='red', size=12)))
-        st.plotly_chart(fig_ef, use_container_width=True)
-
+        # Graphiques
         col_a, col_b = st.columns(2)
         with col_a:
             st.plotly_chart(px.pie(values=w_opt, names=hist_rets.columns, title="Répartition du Capital", hole=0.4), use_container_width=True)
@@ -166,7 +154,7 @@ try:
         comp_df = pd.DataFrame({"Optimisé": (1 + port_rets_ts).cumprod() * 100, "60/40": (1 + bench_rets).cumprod() * 100}, index=hist_rets.index)
         st.line_chart(comp_df)
     else:
-        st.error("⚠️ Impossible de trouver une solution respectant toutes vos contraintes. Essayez d'élargir vos bornes Min/Max.")
+        st.error("⚠️ Impossible de trouver une solution. Vérifiez vos bornes Min/Max.")
 
 except Exception as e:
     st.error(f"Erreur technique : {e}")
