@@ -5,7 +5,7 @@ import cvxpy as cp
 import plotly.express as px
 import yfinance as yf
 
-st.set_page_config(page_title="Terminal CIO - Cap Placement Privé", layout="wide")
+st.set_page_config(page_title="Terminal CIO - Multi-Asset Expert", layout="wide")
 
 # --- 1. CONFIGURATION DES ACTIFS ---
 TICKERS_DICT = {
@@ -45,23 +45,16 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     w = cp.Variable(n)
     lev_amt = cp.sum(w) - 1
     net_return = w @ returns_series.values - (lev_amt * borrow_cost)
-    
     S = (cov_matrix.values + cov_matrix.values.T) / 2 + np.eye(n) * 1e-5
     risk = cp.quad_form(w, cp.psd_wrap(S))
-    
     constraints = [cp.sum(w) <= lev_limit, cp.sum(w) >= 1.0, net_return >= target_ret, w >= 0]
-    
-    # --- NOUVELLES CONTRAINTES DE CAPPING ---
     for i, name in enumerate(returns_series.index):
         constraints.append(w[i] >= asset_bounds[name][0])
         constraints.append(w[i] <= asset_bounds[name][1])
-        # Force le cap spécifique PE
         if name == "Placement Privé (PE)":
             constraints.append(w[i] <= pe_cap)
-            
     ill_idx = [i for i, name in enumerate(returns_series.index) if name in ILLIQUID_ASSETS]
     constraints.append(cp.sum(w[ill_idx]) <= max_ill_limit)
-    
     prob = cp.Problem(cp.Minimize(risk), constraints)
     for solver in [cp.ECOS, cp.OSQP, cp.SCS]:
         try:
@@ -70,66 +63,73 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
         except: continue
     return w.value if w.value is not None else None
 
-# --- 2. INTERFACE SIDEBAR ---
-with st.sidebar:
-    st.header("⚙️ Gouvernance & Limites")
-    lev_max = st.slider("Levier Brut Max", 1.0, 2.5, 1.25)
-    target_r = st.slider("Cible Rendement NET (%)", 4.0, 10.0, 6.5) / 100
-    
-    st.subheader("🚧 Limites de Concentration")
-    pe_limit = st.slider("Cap Placement Privé (%)", 0, 50, 15) / 100
-    max_i = st.slider("Max Alternatifs Cumulés (%)", 10, 80, 50) / 100
-    
-    vol_target = st.slider("Cible Volatilité Max (%)", 5.0, 15.0, 9.0) / 100
-    alpha = st.slider("Alpha (Délissage)", 0.2, 1.0, 0.4)
-    spread_bps = st.number_input("Spread Levier (bps)", value=120)
-
-# --- 3. ONGLETS ---
+# --- 2. LOGIQUE DE CHARGEMENT ---
 try:
     data = get_market_data(TICKERS_DICT)
+
+    # --- 3. INTERFACE SIDEBAR ---
+    with st.sidebar:
+        st.header("⚙️ Gouvernance & Limites")
+        lev_max = st.slider("Levier Brut Max", 1.0, 2.5, 1.25)
+        target_r = st.slider("Cible Rendement NET (%)", 4.0, 10.0, 6.5) / 100
+        pe_limit = st.slider("Cap Placement Privé (%)", 0, 50, 15) / 100
+        max_i = st.slider("Max Alternatifs (%)", 10, 80, 50) / 100
+        alpha = st.slider("Alpha (Délissage)", 0.2, 1.0, 0.4)
+        spread_bps = st.number_input("Spread Levier (bps)", value=120)
+
+    # --- 4. NAVIGATION PAR ONGLETS ---
     tab_opt, tab_risk, tab_lex = st.tabs(["📊 Optimisation", "📈 Analyse Risque", "🔍 Lexique"])
 
+    with tab_lex:
+        st.header("📖 Glossaire Institutionnel")
+        st.markdown("""
+        * **Placement Privé (PE) :** Investissement hors marchés publics avec prime d'illiquidité.
+        * **Délissage (Alpha) :** Ajustement de la volatilité pour les actifs évalués périodiquement.
+        """)
+        applied_fees = {a: st.number_input(f"Frais {a} %", DEFAULT_MER[TICKERS_DICT[a]]*100, step=0.01, key=f"f_{a}")/100 for a in TICKERS_DICT.keys()}
+
+    with tab_risk:
+        st.header("📈 Matrice de Corrélation Historique")
+        fig_corr = px.imshow(data.corr(), text_auto=".2f", color_continuous_scale='RdBu_r', height=700)
+        st.plotly_chart(fig_corr, use_container_width=True)
+
     with tab_opt:
+        st.header("📊 Paramétrage des Bornes")
         asset_bounds = {}
         cols = st.columns(4)
         for i, asset in enumerate(TICKERS_DICT.keys()):
             with cols[i % 4]:
                 b_min = st.number_input(f"Min {asset} %", 0, 100, 0, key=f"m_{asset}")/100
-                # On ajuste dynamiquement le Max affiché pour le PE dans l'UI
-                current_max = 15 if asset == "Placement Privé (PE)" else 50
-                b_max = st.number_input(f"Max {asset} %", 0, 100, current_max, key=f"M_{asset}")/100
+                d_max = 15 if asset == "Placement Privé (PE)" else (0 if asset == "Cash" else 40)
+                b_max = st.number_input(f"Max {asset} %", 0, 100, d_max, key=f"M_{asset}")/100
                 asset_bounds[asset] = (b_min, b_max)
 
         rfr = (1 + data["Cash (RFR)"].mean())**12 - 1
         borrow_cost = rfr + (spread_bps / 10000)
-        exp_raw = data.mean()*12
+        exp_rets = (data.mean()*12) - pd.Series(applied_fees)
         cov_base = data.cov()*12
-        
-        # Ajustement Délissage
         for a in ILLIQUID_ASSETS:
             cov_base.loc[a, :], cov_base.loc[:, a] = cov_base.loc[a, :] * (1/alpha), cov_base.loc[:, a] * (1/alpha)
 
-        applied_fees = pd.Series({a: 0.002 for a in TICKERS_DICT.keys()}) # Frais simplifiés pour la démo
-
-        w_opt = optimize_portfolio(exp_raw - applied_fees, cov_base, lev_max, target_r, borrow_cost, asset_bounds, max_i, pe_limit)
+        w_opt = optimize_portfolio(exp_rets, cov_base, lev_max, target_r, borrow_cost, asset_bounds, max_i, pe_limit)
         
         if w_opt is not None:
             w_opt = np.array([x if x > 0.001 else 0 for x in w_opt])
             p_vol = np.sqrt(w_opt.T @ cov_base @ w_opt)
-            p_ret = (w_opt @ (exp_raw - applied_fees)) - ((np.sum(w_opt)-1) * borrow_cost)
+            p_ret = (w_opt @ exp_rets) - ((np.sum(w_opt)-1) * borrow_cost if np.sum(w_opt) > 1 else 0)
             
             st.divider()
             m1, m2, m3 = st.columns(3)
             m1.metric("Expected Net Return", f"{p_ret:.2%}")
             m2.metric("Portfolio Vol", f"{p_vol:.2%}")
-            m3.metric("Placement Privé Réel", f"{w_opt[list(TICKERS_DICT.keys()).index('Placement Privé (PE)')]:.2%}")
+            m3.metric("Leverage Used", f"{np.sum(w_opt):.2f}x")
 
             c1, c2 = st.columns(2)
             c1.plotly_chart(px.pie(pd.DataFrame({"A": TICKERS_DICT.keys(), "P": w_opt}), values="P", names="A", hole=0.4, title="Asset Mix"), use_container_width=True)
             rc = (w_opt * (cov_base @ w_opt)) / (p_vol**2 if p_vol > 0 else 1)
             c2.plotly_chart(px.bar(x=list(TICKERS_DICT.keys()), y=rc*100, title="Risk Contribution (%)"), use_container_width=True)
         else:
-            st.error("⚠️ Pas de solution. Le Cap du Placement Privé est peut-être trop bas pour atteindre votre cible de rendement.")
+            st.error("⚠️ Pas de solution trouvée. Vérifiez vos contraintes.")
 
-except Exception as e: st.error(f"Erreur technique : {e}")
-    
+except Exception as e:
+    st.error(f"Erreur technique : {e}")
