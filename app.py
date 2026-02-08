@@ -67,17 +67,13 @@ with st.sidebar:
     lev_max = st.slider("Levier Brut Maximum", 1.0, 2.0, 1.25)
     target_r = st.slider("Cible de Rendement (%)", 4.0, 10.0, 6.5) / 100
     alpha = st.slider("Alpha (Délissage)", 0.3, 1.0, 0.5)
-    
     st.header("⚖️ Gouvernance")
     max_s = st.slider("Max par actif (%)", 5, 40, 20) / 100
     max_i = st.slider("Max Alternatifs (%)", 10, 80, 45) / 100
-
     st.header("💳 Coût du Financement")
     spread_bps = st.number_input("Spread sur levier (bps)", value=120, step=10)
-
     st.header("🔮 Vos Hypothèses (CMA)")
     mode_cma = st.radio("Source des rendements :", ["Historique (10 ans)", "Manuel (Anticipations)"])
-    
     user_returns = {}
     user_vols = {}
     if mode_cma == "Manuel (Anticipations)":
@@ -102,25 +98,46 @@ try:
 
     adj_cov = desmooth_cov(adj_cov_base, alpha, ILLIQUID_ASSETS)
 
-    st.divider()
-    with st.expander("🔍 Hypothèses de Marché utilisées"):
-        stats_view = pd.DataFrame({
-            "Rendement (%)": exp_rets * 100,
-            "Volatilité (%)": (np.sqrt(np.diag(adj_cov_base))) * 100
-        })
-        st.dataframe(stats_view.style.format("{:.2f}"), use_container_width=True)
-
     w_opt = optimize_portfolio(exp_rets, adj_cov, lev_max, target_r, borrow_cost, max_s, max_i, ILLIQUID_ASSETS)
 
     if w_opt is not None:
         port_ret = w_opt @ exp_rets - (np.sum(w_opt)-1)*borrow_cost
         port_vol = np.sqrt(w_opt.T @ adj_cov @ w_opt)
         
-        st.subheader("🎯 Allocation Optimale")
+        st.subheader("🎯 Allocation Optimale Sélectionnée")
         m1, m2, m3 = st.columns(3)
         m1.metric("Rendement Net", f"{port_ret:.2%}")
         m2.metric("Volatilité", f"{port_vol:.2%}")
         m3.metric("Sharpe", f"{(port_ret-rfr)/port_vol:.2f}")
+
+        # --- NOUVELLE SECTION : FRONTIÈRE EFFICIENTE ---
+        st.divider()
+        st.subheader("📈 Frontière Efficiente (10 scénarios)")
+        
+        # Calcul de la frontière
+        min_r = max(0.02, exp_rets.min())
+        max_r = min(0.15, exp_rets.max() * lev_max)
+        target_range = np.linspace(min_r, max_r, 10)
+        
+        frontier_vols = []
+        frontier_rets = []
+        
+        for r in target_range:
+            w_tmp = optimize_portfolio(exp_rets, adj_cov, lev_max, r, borrow_cost, max_s, max_i, ILLIQUID_ASSETS)
+            if w_tmp is not None:
+                r_net = w_tmp @ exp_rets - (np.sum(w_tmp)-1)*borrow_cost
+                v_adj = np.sqrt(w_tmp.T @ adj_cov @ w_tmp)
+                frontier_rets.append(r_net)
+                frontier_vols.append(v_adj)
+        
+        fig_ef = go.Figure()
+        fig_ef.add_trace(go.Scatter(x=frontier_vols, y=frontier_rets, mode='lines+markers', 
+                                    name='Frontière Efficiente', line=dict(color='gold', width=4)))
+        fig_ef.add_trace(go.Scatter(x=[port_vol], y=[port_ret], mode='markers', 
+                                    name='Votre Portefeuille', marker=dict(color='red', size=15, symbol='star')))
+        fig_ef.update_layout(xaxis_title="Volatilité Ajustée", yaxis_title="Rendement Net",
+                             template="plotly_dark", height=450)
+        st.plotly_chart(fig_ef, use_container_width=True)
 
         col_a, col_b = st.columns(2)
         with col_a:
@@ -144,7 +161,7 @@ try:
         fig_dd.update_layout(title="Drawdown %", yaxis_title="Perte %", height=350)
         st.plotly_chart(fig_dd, use_container_width=True)
     else:
-        st.error("⚠️ Aucune solution trouvée.")
+        st.error("⚠️ Aucune solution trouvée. Ajustez vos paramètres.")
 
 except Exception as e:
     st.error(f"Erreur technique : {e}")
