@@ -5,7 +5,7 @@ import cvxpy as cp
 import plotly.express as px
 import yfinance as yf
 
-st.set_page_config(page_title="Terminal CIO - Master Control", layout="wide")
+st.set_page_config(page_title="Terminal CIO - Contrôle Total", layout="wide")
 
 # --- 1. CONFIGURATION DES ACTIFS ---
 TICKERS_DICT = {
@@ -40,16 +40,10 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     lev_amt = cp.sum(w) - 1
     net_return = w @ returns_series.values - (lev_amt * borrow_cost)
     
-    # Sécurité PSD (Positive Semi-Definite)
     S = (cov_matrix.values + cov_matrix.values.T) / 2 + np.eye(n) * 1e-4
     risk = cp.quad_form(w, cp.psd_wrap(S))
     
-    constraints = [
-        cp.sum(w) <= lev_limit, 
-        cp.sum(w) >= 1.0, 
-        net_return >= target_ret, 
-        w >= 0
-    ]
+    constraints = [cp.sum(w) <= lev_limit, cp.sum(w) >= 1.0, net_return >= target_ret, w >= 0]
     
     for i, name in enumerate(returns_series.index):
         if name == "Placement Privé (PE)":
@@ -62,17 +56,11 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     constraints.append(cp.sum(w[ill_idx]) <= max_ill_limit)
     
     prob = cp.Problem(cp.Minimize(risk), constraints)
-    
-    # CASCADE DE SOLVEURS : Tente OSQP, puis SCS, puis ECOS
-    solvers = [cp.OSQP, cp.SCS, cp.ECOS]
-    for s in solvers:
+    for s in [cp.OSQP, cp.SCS, cp.ECOS]:
         try:
             prob.solve(solver=s)
-            if w.value is not None:
-                break
-        except Exception:
-            continue
-            
+            if w.value is not None: break
+        except: continue
     return w.value if w.value is not None else None
 
 # --- 2. INTERFACE ET LOGIQUE ---
@@ -83,12 +71,20 @@ try:
         st.header("⚙️ Gouvernance CIO")
         lev_max = st.slider("Levier Brut Max", 1.0, 2.5, 1.25)
         target_r = st.slider("Cible Rendement NET (%)", 4.0, 10.0, 6.5) / 100
-        
-        st.subheader("📌 Allocation Stratégique")
         pe_fix = st.number_input("Fixer Placement Privé %", 0.0, 30.0, 10.0) / 100
-        
         alpha = st.slider("Alpha (Délissage)", 0.2, 1.0, 0.4)
         spread_bps = st.number_input("Spread Levier (bps)", value=94)
+        
+        st.header("🔮 Capital Market Assumptions")
+        mode_cma = st.radio("Source des données :", ["Historique", "Manuel"])
+        user_rets, user_vols = {}, {}
+        if mode_cma == "Manuel":
+            st.info("Saisissez vos attentes de rendement et de volatilité.")
+            for asset in TICKERS_DICT.keys():
+                st.markdown(f"**{asset}**")
+                c1, c2 = st.columns(2)
+                user_rets[asset] = c1.number_input(f"Rend. %", 7.0, key=f"r_{asset}")/100
+                user_vols[asset] = c2.number_input(f"Vol. %", 12.0, key=f"v_{asset}")/100
 
     tab_opt, tab_risk = st.tabs(["📊 Optimisation", "📈 Analyse Risque"])
 
@@ -99,23 +95,26 @@ try:
         for i, asset in enumerate(TICKERS_DICT.keys()):
             if asset == "Placement Privé (PE)": continue
             with cols[i % 4]:
-                b_min = st.number_input(f"Min {asset} %", 0, 100, 0, key=f"min_{asset}")/100
+                b_min = st.number_input(f"Min {asset} %", 0, 100, 0, key=f"m_{asset}")/100
                 d_max = 0 if "Cash" in asset else 50
-                b_max = st.number_input(f"Max {asset} %", 0, 100, d_max, key=f"max_{asset}")/100
+                b_max = st.number_input(f"Max {asset} %", 0, 100, d_max, key=f"M_{asset}")/100
                 asset_bounds[asset] = (b_min, b_max)
 
         rfr = (1 + data["Cash (RFR)"].mean())**12 - 1
         borrow_cost = rfr + (spread_bps / 10000)
         
-        exp_raw = data.mean()*12
-        cov_base = data.cov()*12
+        if mode_cma == "Manuel":
+            exp_raw = pd.Series(user_rets)
+            v_diag = np.diag([user_vols[a] for a in TICKERS_DICT.keys()])
+            cov_base = pd.DataFrame(v_diag @ data.corr().values @ v_diag, index=data.columns, columns=data.columns)
+        else:
+            exp_raw = data.mean()*12
+            cov_base = data.cov()*12
         
-        # Délissage des actifs illiquides
         for a in ILLIQUID_ASSETS + ["Placement Privé (PE)"]:
             cov_base.loc[a, :], cov_base.loc[:, a] = cov_base.loc[a, :] * (1/alpha), cov_base.loc[:, a] * (1/alpha)
 
         applied_fees = pd.Series({a: 0.0025 for a in TICKERS_DICT.keys()}) 
-
         w_opt = optimize_portfolio(exp_raw - applied_fees, cov_base, lev_max, target_r, borrow_cost, asset_bounds, 0.5, pe_fix)
         
         if w_opt is not None:
@@ -124,17 +123,22 @@ try:
             p_ret = (w_opt @ (exp_raw - applied_fees)) - ((np.sum(w_opt)-1) * borrow_cost if np.sum(w_opt) > 1 else 0)
             
             st.divider()
-            res_c1, res_c2, res_c3 = st.columns(3)
-            res_c1.metric("Expected Net Return", f"{p_ret:.2%}")
-            res_c2.metric("Portfolio Vol", f"{p_vol:.2%}")
-            res_c3.metric("Leverage Used", f"{np.sum(w_opt):.2f}x")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Expected Net Return", f"{p_ret:.2%}")
+            m2.metric("Portfolio Vol", f"{p_vol:.2%}")
+            m3.metric("Leverage Used", f"{np.sum(w_opt):.2f}x")
 
             c1, c2 = st.columns(2)
-            c1.plotly_chart(px.pie(pd.DataFrame({"A": TICKERS_DICT.keys(), "P": w_opt}), values="P", names="A", hole=0.4, title="Mix Actifs"), use_container_width=True)
+            # Restaurer les légendes sur les graphiques
+            fig_pie = px.pie(pd.DataFrame({"Actif": TICKERS_DICT.keys(), "Poids": w_opt}), 
+                             values="Poids", names="Actif", hole=0.4, title="Mix Actifs (Allocation)")
+            fig_pie.update_layout(showlegend=True)
+            c1.plotly_chart(fig_pie, use_container_width=True)
+
             rc = (w_opt * (cov_base @ w_opt)) / (p_vol**2 if p_vol > 0 else 1)
-            c2.plotly_chart(px.bar(x=list(TICKERS_DICT.keys()), y=rc*100, title="Risk Contribution (%)"), use_container_width=True)
-        else:
-            st.error("⚠️ Erreur de convergence : Cible inatteignable ou solveurs indisponibles.")
+            fig_bar = px.bar(x=list(TICKERS_DICT.keys()), y=rc*100, 
+                             title="Contribution au Risque (%)", labels={'x': 'Actif', 'y': 'Risque (%)'})
+            c2.plotly_chart(fig_bar, use_container_width=True)
 
     with tab_risk:
         st.header("Matrice de Corrélation Historique")
