@@ -40,7 +40,7 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     lev_amt = cp.sum(w) - 1
     net_return = w @ returns_series.values - (lev_amt * borrow_cost)
     
-    # Sécurité PSD pour éviter les erreurs DCP
+    # Sécurité PSD (Positive Semi-Definite)
     S = (cov_matrix.values + cov_matrix.values.T) / 2 + np.eye(n) * 1e-4
     risk = cp.quad_form(w, cp.psd_wrap(S))
     
@@ -62,7 +62,17 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     constraints.append(cp.sum(w[ill_idx]) <= max_ill_limit)
     
     prob = cp.Problem(cp.Minimize(risk), constraints)
-    prob.solve(solver=cp.ECOS)
+    
+    # CASCADE DE SOLVEURS : Tente OSQP, puis SCS, puis ECOS
+    solvers = [cp.OSQP, cp.SCS, cp.ECOS]
+    for s in solvers:
+        try:
+            prob.solve(solver=s)
+            if w.value is not None:
+                break
+        except Exception:
+            continue
+            
     return w.value if w.value is not None else None
 
 # --- 2. INTERFACE ET LOGIQUE ---
@@ -75,7 +85,6 @@ try:
         target_r = st.slider("Cible Rendement NET (%)", 4.0, 10.0, 6.5) / 100
         
         st.subheader("📌 Allocation Stratégique")
-        # CASE DE FIXATION MANUELLE DU PE
         pe_fix = st.number_input("Fixer Placement Privé %", 0.0, 30.0, 10.0) / 100
         
         alpha = st.slider("Alpha (Délissage)", 0.2, 1.0, 0.4)
@@ -98,10 +107,10 @@ try:
         rfr = (1 + data["Cash (RFR)"].mean())**12 - 1
         borrow_cost = rfr + (spread_bps / 10000)
         
-        # CMA
         exp_raw = data.mean()*12
         cov_base = data.cov()*12
-        # Délissage
+        
+        # Délissage des actifs illiquides
         for a in ILLIQUID_ASSETS + ["Placement Privé (PE)"]:
             cov_base.loc[a, :], cov_base.loc[:, a] = cov_base.loc[a, :] * (1/alpha), cov_base.loc[:, a] * (1/alpha)
 
@@ -125,11 +134,11 @@ try:
             rc = (w_opt * (cov_base @ w_opt)) / (p_vol**2 if p_vol > 0 else 1)
             c2.plotly_chart(px.bar(x=list(TICKERS_DICT.keys()), y=rc*100, title="Risk Contribution (%)"), use_container_width=True)
         else:
-            st.error("⚠️ Incohérence mathématique : la cible est inatteignable avec ces bornes.")
+            st.error("⚠️ Erreur de convergence : Cible inatteignable ou solveurs indisponibles.")
 
     with tab_risk:
         st.header("Matrice de Corrélation Historique")
         st.plotly_chart(px.imshow(data.corr(), text_auto=".2f", color_continuous_scale='RdBu_r', height=700), use_container_width=True)
 
 except Exception as e:
-    st.error(f"Erreur technique : {e}")
+    st.error(f"Erreur d'exécution : {e}")
