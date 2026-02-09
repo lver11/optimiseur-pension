@@ -5,7 +5,7 @@ import cvxpy as cp
 import plotly.express as px
 import yfinance as yf
 
-st.set_page_config(page_title="Terminal CIO - Contrôle Institutionnel", layout="wide")
+st.set_page_config(page_title="Terminal CIO - Expert Institutionnel", layout="wide")
 
 # --- 1. CONFIGURATION DES ACTIFS ---
 TICKERS_DICT = {
@@ -24,7 +24,6 @@ TICKERS_DICT = {
     "Cash (RFR)": "PSA.TO"
 }
 
-# Valeurs par défaut pour les frais (MER)
 DEFAULT_MER = {
     "VFV.TO": 0.0009, "VXC.TO": 0.0021, "PSP": 0.0180, "VEE.TO": 0.0024, 
     "VWOB": 0.0020, "ZGI.TO": 0.0061, "VRE.TO": 0.0039, "DBC": 0.0085, 
@@ -47,7 +46,7 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     lev_amt = cp.sum(w) - 1
     net_return = w @ returns_series.values - (lev_amt * borrow_cost)
     
-    # Sécurité PSD augmentée
+    # Sécurité PSD pour stabilité numérique
     S = (cov_matrix.values + cov_matrix.values.T) / 2 + np.eye(n) * 1e-4
     risk = cp.quad_form(w, cp.psd_wrap(S))
     
@@ -56,7 +55,7 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
         cp.sum(w) >= 1.0, 
         net_return >= target_ret, 
         w >= 0,
-        risk <= (vol_cap ** 2) # CONTRAINTE DE VOLATILITÉ VISÉE
+        risk <= (vol_cap ** 2)
     ]
     
     for i, name in enumerate(returns_series.index):
@@ -70,7 +69,6 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     constraints.append(cp.sum(w[ill_idx]) <= max_ill_limit)
     
     prob = cp.Problem(cp.Minimize(risk), constraints)
-    # Cascade de solveurs
     for s in [cp.OSQP, cp.SCS, cp.ECOS]:
         try:
             prob.solve(solver=s)
@@ -107,13 +105,11 @@ try:
 
     with tab_fees:
         st.header("🖊️ Saisie Manuelle des Frais (MER/RFG)")
-        st.info("Ajustez les frais pour chaque classe d'actif. Ces valeurs impactent directement le Rendement Net.")
         manual_fees = {}
         f_cols = st.columns(3)
         for i, asset in enumerate(TICKERS_DICT.keys()):
             with f_cols[i % 3]:
-                ticker = TICKERS_DICT[asset]
-                manual_fees[asset] = st.number_input(f"Frais {asset} (%)", 0.0, 5.0, DEFAULT_MER[ticker]*100, step=0.01, key=f"fee_{asset}") / 100
+                manual_fees[asset] = st.number_input(f"Frais {asset} (%)", 0.0, 5.0, DEFAULT_MER[TICKERS_DICT[asset]]*100, step=0.01, key=f"fee_{asset}") / 100
 
     with tab_opt:
         asset_bounds = {}
@@ -123,8 +119,7 @@ try:
             if asset == "Placement Privé (PE)": continue
             with cols[i % 4]:
                 b_min = st.number_input(f"Min {asset} %", 0, 100, 0, key=f"m_{asset}")/100
-                d_max = 0 if "Cash" in asset else 50
-                b_max = st.number_input(f"Max {asset} %", 0, 100, d_max, key=f"M_{asset}")/100
+                b_max = st.number_input(f"Max {asset} %", 0, 100, 50, key=f"M_{asset}")/100
                 asset_bounds[asset] = (b_min, b_max)
 
         rfr = (1 + data["Cash (RFR)"].mean())**12 - 1
@@ -136,25 +131,26 @@ try:
             v_diag = np.diag([user_vols[a] for a in TICKERS_DICT.keys()])
             cov_base = pd.DataFrame(v_diag @ data.corr().values @ v_diag, index=data.columns, columns=data.columns)
         
-        # Délissage
         for a in ILLIQUID_ASSETS + ["Placement Privé (PE)"]:
             cov_base.loc[a, :], cov_base.loc[:, a] = cov_base.loc[a, :] * (1/alpha), cov_base.loc[:, a] * (1/alpha)
 
         applied_fees_series = pd.Series(manual_fees)
-        w_opt = optimize_portfolio(exp_raw - applied_fees_series, cov_base, lev_max, target_r, borrow_cost, asset_bounds, 0.5, pe_fix, vol_target)
+        exp_rets_net = exp_raw - applied_fees_series
+        
+        w_opt = optimize_portfolio(exp_rets_net, cov_base, lev_max, target_r, borrow_cost, asset_bounds, 0.5, pe_fix, vol_target)
         
         if w_opt is not None:
             w_opt = np.array([x if x > 0.0001 else 0 for x in w_opt])
             p_vol = np.sqrt(w_opt.T @ cov_base @ w_opt)
-            p_ret = (w_opt @ (exp_raw - applied_fees_series)) - ((np.sum(w_opt)-1) * borrow_cost if np.sum(w_opt) > 1 else 0)
-            total_ter = np.sum(w_opt * applied_fees_series)
+            p_ret = (w_opt @ exp_rets_net) - ((np.sum(w_opt)-1) * borrow_cost if np.sum(w_opt) > 1 else 0)
+            p_fees = np.sum(w_opt * applied_fees_series)
             
             st.divider()
-            res_c1, res_c2, res_c3, res_c4 = st.columns(4)
-            res_c1.metric("Expected Net Return", f"{p_ret:.2%}")
-            res_c2.metric("Portfolio Vol", f"{p_vol:.2%}", delta=f"Cible: {vol_target:.1%}")
-            res_c3.metric("Leverage Used", f"{np.sum(w_opt):.2f}x")
-            res_c4.metric("Total Fees (TER)", f"{total_ter:.2%}")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Expected Net Return", f"{p_ret:.2%}")
+            m2.metric("Portfolio Vol", f"{p_vol:.2%}", delta=f"Cible: {vol_target:.1%}")
+            m3.metric("Leverage Used", f"{np.sum(w_opt):.2f}x")
+            m4.metric("Total Fees (TER)", f"{p_fees:.2%}")
 
             c1, c2 = st.columns(2)
             fig_pie = px.pie(pd.DataFrame({"Actif": TICKERS_DICT.keys(), "Poids": w_opt}), 
@@ -165,12 +161,41 @@ try:
             rc = (w_opt * (cov_base @ w_opt)) / (p_vol**2 if p_vol > 0 else 1)
             fig_bar = px.bar(x=list(TICKERS_DICT.keys()), y=rc*100, title="Contribution au Risque (%)")
             c2.plotly_chart(fig_bar, use_container_width=True)
+
+            # --- ANALYSE DES 10 PORTEFEUILLES DE LA FRONTIÈRE ---
+            st.divider()
+            st.header("🏁 Analyse de la Frontière Efficiente (10 Profils)")
+            
+            max_r_possible = (exp_rets_net.max() * lev_max) - ((lev_max-1) * borrow_cost)
+            t_range = np.linspace(float(target_r * 0.7), float(max_r_possible * 0.85), 10)
+            
+            frontier_list = []
+            for i, r_t in enumerate(t_range):
+                w_s = optimize_portfolio(exp_rets_net, cov_base, lev_max, r_t, borrow_cost, asset_bounds, 0.5, pe_fix, vol_target)
+                if w_s is not None:
+                    v_s = np.sqrt(w_s.T @ cov_base @ w_s)
+                    r_s = (w_s @ exp_rets_net) - ((np.sum(w_s)-1) * borrow_cost if np.sum(w_s) > 1 else 0)
+                    row = {"Portefeuille": f"P{i+1}", "Rendement": r_s, "Volatilité": v_s}
+                    for j, a_name in enumerate(TICKERS_DICT.keys()):
+                        row[a_name] = w_s[j]
+                    frontier_list.append(row)
+            
+            if frontier_list:
+                df_f = pd.DataFrame(frontier_list)
+                st.subheader("Migration de l'Asset Mix le long de la frontière")
+                
+                fig_area = px.area(df_f.melt(id_vars=["Portefeuille", "Rendement", "Volatilité"], var_name="Actif", value_name="Poids"), 
+                                   x="Portefeuille", y="Poids", color="Actif", height=500)
+                st.plotly_chart(fig_area, use_container_width=True)
+                
+                st.subheader("Données Quantitatives")
+                st.dataframe(df_f.style.format({"Rendement": "{:.2%}", "Volatilité": "{:.2%}", **{a: "{:.1%}" for a in TICKERS_DICT.keys()}}))
         else:
-            st.error("⚠️ Incohérence mathématique : La cible de rendement est inatteignable sous votre plafond de volatilité.")
+            st.error("⚠️ Incohérence : Cible inatteignable sous ces contraintes.")
 
     with tab_risk:
         st.header("Matrice de Corrélation Historique")
         st.plotly_chart(px.imshow(data.corr(), text_auto=".2f", color_continuous_scale='RdBu_r', height=700), use_container_width=True)
 
 except Exception as e:
-    st.error(f"Erreur technique : {e}")
+    st.error(f"Erreur d'exécution : {e}")
