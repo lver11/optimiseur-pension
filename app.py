@@ -5,7 +5,7 @@ import cvxpy as cp
 import plotly.express as px
 import yfinance as yf
 
-st.set_page_config(page_title="Terminal CIO - Analyse de Frontière", layout="wide")
+st.set_page_config(page_title="Terminal CIO - Contrôle Institutionnel", layout="wide")
 
 # --- 1. CONFIGURATION DES ACTIFS ---
 TICKERS_DICT = {
@@ -115,15 +115,27 @@ try:
         manual_fees = {a: st.number_input(f"Frais {a} (%)", 0.0, 5.0, DEFAULT_MER[TICKERS_DICT[a]]*100, step=0.01, key=f"f_{a}")/100 for a in TICKERS_DICT.keys()}
 
     with tab_opt:
-        # Définition des bornes
-        asset_bounds = {a: (0.0, 0.5) for a in TICKERS_DICT.keys() if a != "Placement Privé (PE)"}
-        
+        # --- BORNES TACTIQUES EN HAUT ---
+        st.header("📊 Bornes Tactiques (Actifs Liquides)")
+        asset_bounds = {}
+        cols = st.columns(4)
+        for i, asset in enumerate(TICKERS_DICT.keys()):
+            if asset == "Placement Privé (PE)": continue
+            with cols[i % 4]:
+                b_min = st.number_input(f"Min {asset} %", 0, 100, 0, key=f"m_{asset}")/100
+                d_max = 0 if "Cash" in asset else 50
+                b_max = st.number_input(f"Max {asset} %", 0, 100, d_max, key=f"M_{asset}")/100
+                asset_bounds[asset] = (b_min, b_max)
+
         rfr = (1 + data["Cash (RFR)"].mean())**12 - 1
         borrow_cost = rfr + (spread_bps / 10000)
         exp_raw = pd.Series(user_rets) if mode_cma == "Manuel" else data.mean()*12
         cov_base = data.cov()*12
         
-        # Délissage
+        if mode_cma == "Manuel":
+            v_diag = np.diag([user_vols[a] for a in TICKERS_DICT.keys()])
+            cov_base = pd.DataFrame(v_diag @ data.corr().values @ v_diag, index=data.columns, columns=data.columns)
+        
         for a in ILLIQUID_ASSETS + ["Placement Privé (PE)"]:
             cov_base.loc[a, :], cov_base.loc[:, a] = cov_base.loc[a, :] * (1/alpha), cov_base.loc[:, a] * (1/alpha)
 
@@ -138,11 +150,10 @@ try:
             st.divider()
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Expected Net Return", f"{p_ret:.2%}")
-            m2.metric("Portfolio Vol", f"{p_vol:.2%}")
+            m2.metric("Portfolio Vol", f"{p_vol:.2%}", delta=f"Cible: {vol_target:.1%}")
             m3.metric("Leverage Used", f"{np.sum(w_opt):.2f}x")
             m4.metric("TER Total", f"{np.sum(w_opt * applied_fees_series):.2%}")
 
-            # Graphiques avec légendes restaurées
             c1, c2 = st.columns(2)
             fig_pie = px.pie(pd.DataFrame({"Actif": TICKERS_DICT.keys(), "Poids": w_opt}), values="Poids", names="Actif", hole=0.4, title="Mix Actifs")
             fig_pie.update_layout(showlegend=True)
@@ -152,12 +163,12 @@ try:
             fig_bar = px.bar(x=list(TICKERS_DICT.keys()), y=rc*100, title="Contribution au Risque (%)", labels={'x': 'Actif', 'y': 'Risque (%)'})
             c2.plotly_chart(fig_bar, use_container_width=True)
 
-            # --- ANALYSE DES 10 PORTEFEUILLES ---
+            # --- ANALYSE DE LA FRONTIÈRE ---
             st.divider()
             st.header("📈 Frontière Efficiente : Comparaison de 10 Portefeuilles")
             
             
-            t_min, t_max = target_r * 0.8, target_r * 1.5
+            t_min, t_max = target_r * 0.7, target_r * 1.5
             targets = np.linspace(t_min, t_max, 10)
             frontier_data = []
 
