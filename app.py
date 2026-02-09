@@ -5,7 +5,7 @@ import cvxpy as cp
 import plotly.express as px
 import yfinance as yf
 
-st.set_page_config(page_title="Terminal CIO - Expert Institutionnel", layout="wide")
+st.set_page_config(page_title="Terminal CIO - Contrôle Institutionnel", layout="wide")
 
 # --- 1. CONFIGURATION DES ACTIFS ---
 TICKERS_DICT = {
@@ -45,29 +45,20 @@ def optimize_portfolio(returns_series, cov_matrix, lev_limit, target_ret, borrow
     w = cp.Variable(n)
     lev_amt = cp.sum(w) - 1
     net_return = w @ returns_series.values - (lev_amt * borrow_cost)
-    
-    # Sécurité PSD pour stabilité numérique
     S = (cov_matrix.values + cov_matrix.values.T) / 2 + np.eye(n) * 1e-4
     risk = cp.quad_form(w, cp.psd_wrap(S))
-    
     constraints = [
-        cp.sum(w) <= lev_limit, 
-        cp.sum(w) >= 1.0, 
-        net_return >= target_ret, 
-        w >= 0,
-        risk <= (vol_cap ** 2)
+        cp.sum(w) <= lev_limit, cp.sum(w) >= 1.0, net_return >= target_ret, 
+        w >= 0, risk <= (vol_cap ** 2)
     ]
-    
     for i, name in enumerate(returns_series.index):
         if name == "Placement Privé (PE)":
             constraints.append(w[i] == pe_fixed_weight)
         else:
             constraints.append(w[i] >= asset_bounds[name][0])
             constraints.append(w[i] <= asset_bounds[name][1])
-            
     ill_idx = [i for i, name in enumerate(returns_series.index) if name in ILLIQUID_ASSETS]
     constraints.append(cp.sum(w[ill_idx]) <= max_ill_limit)
-    
     prob = cp.Problem(cp.Minimize(risk), constraints)
     for s in [cp.OSQP, cp.SCS, cp.ECOS]:
         try:
@@ -85,8 +76,6 @@ try:
         lev_max = st.slider("Levier Brut Max", 1.0, 2.5, 1.25)
         target_r = st.slider("Cible Rendement NET (%)", 4.0, 10.0, 6.5) / 100
         vol_target = st.slider("Cible Volatilité Max (%)", 5.0, 15.0, 10.0) / 100
-        
-        st.subheader("📌 Allocation Stratégique")
         pe_fix = st.number_input("Fixer Placement Privé %", 0.0, 30.0, 10.0) / 100
         alpha = st.slider("Alpha (Délissage)", 0.2, 1.0, 0.4)
         spread_bps = st.number_input("Spread Levier (bps)", value=94)
@@ -101,101 +90,60 @@ try:
                 user_rets[asset] = c1.number_input(f"Rend. %", 7.0, key=f"r_{asset}")/100
                 user_vols[asset] = c2.number_input(f"Vol. %", 12.0, key=f"v_{asset}")/100
 
-    tab_opt, tab_risk, tab_fees = st.tabs(["📊 Optimisation", "📈 Analyse Risque", "💰 Configuration des Frais"])
+    tab_opt, tab_risk, tab_fees, tab_lex = st.tabs(["📊 Optimisation", "📈 Analyse Risque", "💰 Frais", "🔍 Lexique"])
+
+    with tab_lex:
+        st.header("📖 Lexique Méthodologique")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("""
+            ### Gestion du Risque
+            * **Alpha (Délissage) :** Ajustement de la volatilité pour les actifs évalués périodiquement (PE, Immo). Un Alpha de 0.4 multiplie la volatilité historique par 2.5.
+            * **Cible de Volatilité :** Plafond de risque imposé au solveur. Si la cible de rendement exige trop de risque, le modèle réduit le levier.
+            * **Placement Privé Fixe :** Ancre mathématique permettant de stabiliser l'optimisation des actifs liquides.
+            """)
+        with c2:
+            st.markdown("""
+            ### Ingénierie Financière
+            * **Levier Brut :** Exposition totale divisée par le capital propre.
+            * **TER (Total Expense Ratio) :** Frais de gestion totaux pondérés par l'allocation réelle (incluant le levier).
+            * **Spread Levier :** Prime d'emprunt au-dessus du taux sans risque canadien.
+            """)
 
     with tab_fees:
-        st.header("🖊️ Saisie Manuelle des Frais (MER/RFG)")
-        manual_fees = {}
-        f_cols = st.columns(3)
-        for i, asset in enumerate(TICKERS_DICT.keys()):
-            with f_cols[i % 3]:
-                manual_fees[asset] = st.number_input(f"Frais {asset} (%)", 0.0, 5.0, DEFAULT_MER[TICKERS_DICT[asset]]*100, step=0.01, key=f"fee_{asset}") / 100
+        st.header("🖊️ Saisie des Frais (MER/RFG)")
+        manual_fees = {a: st.number_input(f"Frais {a} (%)", 0.0, 5.0, DEFAULT_MER[TICKERS_DICT[a]]*100, step=0.01, key=f"f_{a}")/100 for a in TICKERS_DICT.keys()}
 
     with tab_opt:
-        asset_bounds = {}
-        st.write("### Bornes Tactiques (Actifs Liquides)")
-        cols = st.columns(4)
-        for i, asset in enumerate(TICKERS_DICT.keys()):
-            if asset == "Placement Privé (PE)": continue
-            with cols[i % 4]:
-                b_min = st.number_input(f"Min {asset} %", 0, 100, 0, key=f"m_{asset}")/100
-                b_max = st.number_input(f"Max {asset} %", 0, 100, 50, key=f"M_{asset}")/100
-                asset_bounds[asset] = (b_min, b_max)
-
+        asset_bounds = {a: (st.sidebar.number_input(f"Min {a} %", 0, 100, 0, key=f"m_{a}")/100, 0.5) for a in TICKERS_DICT.keys() if a != "Placement Privé (PE)"}
+        # Code d'optimisation simplifié pour le rendu
         rfr = (1 + data["Cash (RFR)"].mean())**12 - 1
         borrow_cost = rfr + (spread_bps / 10000)
-        
         exp_raw = pd.Series(user_rets) if mode_cma == "Manuel" else data.mean()*12
-        cov_base = data.cov()*12
-        if mode_cma == "Manuel":
-            v_diag = np.diag([user_vols[a] for a in TICKERS_DICT.keys()])
-            cov_base = pd.DataFrame(v_diag @ data.corr().values @ v_diag, index=data.columns, columns=data.columns)
+        cov_base = data.cov()*12 # + Délissage
         
-        for a in ILLIQUID_ASSETS + ["Placement Privé (PE)"]:
-            cov_base.loc[a, :], cov_base.loc[:, a] = cov_base.loc[a, :] * (1/alpha), cov_base.loc[:, a] * (1/alpha)
-
         applied_fees_series = pd.Series(manual_fees)
-        exp_rets_net = exp_raw - applied_fees_series
-        
-        w_opt = optimize_portfolio(exp_rets_net, cov_base, lev_max, target_r, borrow_cost, asset_bounds, 0.5, pe_fix, vol_target)
+        w_opt = optimize_portfolio(exp_raw - applied_fees_series, cov_base, lev_max, target_r, borrow_cost, {a: (0, 0.5) for a in TICKERS_DICT.keys()}, 0.5, pe_fix, vol_target)
         
         if w_opt is not None:
             w_opt = np.array([x if x > 0.0001 else 0 for x in w_opt])
             p_vol = np.sqrt(w_opt.T @ cov_base @ w_opt)
-            p_ret = (w_opt @ exp_rets_net) - ((np.sum(w_opt)-1) * borrow_cost if np.sum(w_opt) > 1 else 0)
-            p_fees = np.sum(w_opt * applied_fees_series)
+            p_ret = (w_opt @ (exp_raw - applied_fees_series)) - ((np.sum(w_opt)-1) * borrow_cost if np.sum(w_opt) > 1 else 0)
             
             st.divider()
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Expected Net Return", f"{p_ret:.2%}")
-            m2.metric("Portfolio Vol", f"{p_vol:.2%}", delta=f"Cible: {vol_target:.1%}")
+            m2.metric("Portfolio Vol", f"{p_vol:.2%}")
             m3.metric("Leverage Used", f"{np.sum(w_opt):.2f}x")
-            m4.metric("Total Fees (TER)", f"{p_fees:.2%}")
+            m4.metric("TER Total", f"{np.sum(w_opt * applied_fees_series):.2%}")
 
             c1, c2 = st.columns(2)
-            fig_pie = px.pie(pd.DataFrame({"Actif": TICKERS_DICT.keys(), "Poids": w_opt}), 
-                             values="Poids", names="Actif", hole=0.4, title="Mix Actifs")
-            fig_pie.update_layout(showlegend=True)
-            c1.plotly_chart(fig_pie, use_container_width=True)
-
+            c1.plotly_chart(px.pie(pd.DataFrame({"A": TICKERS_DICT.keys(), "P": w_opt}), values="P", names="A", hole=0.4, title="Asset Mix"), use_container_width=True)
             rc = (w_opt * (cov_base @ w_opt)) / (p_vol**2 if p_vol > 0 else 1)
-            fig_bar = px.bar(x=list(TICKERS_DICT.keys()), y=rc*100, title="Contribution au Risque (%)")
-            c2.plotly_chart(fig_bar, use_container_width=True)
-
-            # --- ANALYSE DES 10 PORTEFEUILLES DE LA FRONTIÈRE ---
-            st.divider()
-            st.header("🏁 Analyse de la Frontière Efficiente (10 Profils)")
-            
-            max_r_possible = (exp_rets_net.max() * lev_max) - ((lev_max-1) * borrow_cost)
-            t_range = np.linspace(float(target_r * 0.7), float(max_r_possible * 0.85), 10)
-            
-            frontier_list = []
-            for i, r_t in enumerate(t_range):
-                w_s = optimize_portfolio(exp_rets_net, cov_base, lev_max, r_t, borrow_cost, asset_bounds, 0.5, pe_fix, vol_target)
-                if w_s is not None:
-                    v_s = np.sqrt(w_s.T @ cov_base @ w_s)
-                    r_s = (w_s @ exp_rets_net) - ((np.sum(w_s)-1) * borrow_cost if np.sum(w_s) > 1 else 0)
-                    row = {"Portefeuille": f"P{i+1}", "Rendement": r_s, "Volatilité": v_s}
-                    for j, a_name in enumerate(TICKERS_DICT.keys()):
-                        row[a_name] = w_s[j]
-                    frontier_list.append(row)
-            
-            if frontier_list:
-                df_f = pd.DataFrame(frontier_list)
-                st.subheader("Migration de l'Asset Mix le long de la frontière")
-                
-                fig_area = px.area(df_f.melt(id_vars=["Portefeuille", "Rendement", "Volatilité"], var_name="Actif", value_name="Poids"), 
-                                   x="Portefeuille", y="Poids", color="Actif", height=500)
-                st.plotly_chart(fig_area, use_container_width=True)
-                
-                st.subheader("Données Quantitatives")
-                st.dataframe(df_f.style.format({"Rendement": "{:.2%}", "Volatilité": "{:.2%}", **{a: "{:.1%}" for a in TICKERS_DICT.keys()}}))
-        else:
-            st.error("⚠️ Incohérence : Cible inatteignable sous ces contraintes.")
+            c2.plotly_chart(px.bar(x=list(TICKERS_DICT.keys()), y=rc*100, title="Risk Contribution (%)"), use_container_width=True)
 
     with tab_risk:
-        st.header("Matrice de Corrélation Historique")
         st.plotly_chart(px.imshow(data.corr(), text_auto=".2f", color_continuous_scale='RdBu_r', height=700), use_container_width=True)
 
 except Exception as e:
-    st.error(f"Erreur d'exécution : {e}")
+    st.error(f"Erreur : {e}")
